@@ -3,6 +3,7 @@ import os
 import discord
 from discord import app_commands
 from dotenv import load_dotenv
+from database import init_db
 
 
 load_dotenv()
@@ -32,8 +33,9 @@ tree = app_commands.CommandTree(client)
 
 @client.event
 async def on_ready():
-    guild = discord.Object(id=GUILD_ID)
+    init_db()
 
+    guild = discord.Object(id=GUILD_ID)
     await tree.sync(guild=guild)
 
     print("==============================")
