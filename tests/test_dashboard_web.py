@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import asyncio
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,7 +16,12 @@ from mcorp.dashboard.app import create_app
 from mcorp.dashboard.auth import AccessDenied, DiscordOAuthClient, OAuthIdentity
 from mcorp.dashboard.config import DashboardSettings
 from mcorp.dashboard.services import DashboardService
+from mcorp.dashboard.scheduler import ProductionScheduleStore
+from mcorp.control import EconomyControlService
+from mcorp.inventory import InventoryStore
+from mcorp.inventory_service import InventoryService
 from mcorp.ledger import LedgerStore
+from mcorp.shops import ShopStore
 
 
 INSTITUTION = "mcorp:guild:1"
@@ -61,13 +67,28 @@ class FakeOAuth:
 
 
 class DashboardWebTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.tempdir = tempfile.TemporaryDirectory()
-        self.path = Path(self.tempdir.name) / "ledger.sqlite3"
-        ledger = LedgerStore(self.path)
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.tempdir = tempfile.TemporaryDirectory()
+        cls.base_path = Path(cls.tempdir.name) / "dashboard-fixture.sqlite3"
+        ledger = LedgerStore(cls.base_path)
         ledger.initialize()
         ledger.ensure_institution(INSTITUTION, "M Corp", 999)
         ledger.mark_initialized(INSTITUTION, 999, 0)
+        service = DashboardService.from_database(cls.base_path, INSTITUTION)
+        service.control.create_shop(
+            INSTITUTION, "LUCAS_STORE", "Boutique Lucas", "USER", "42",
+            administrator_id=100, license_required=True,
+            auto_restock_allowed=True,
+        )
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.tempdir.cleanup()
+
+    def setUp(self) -> None:
+        self.path = Path(self.tempdir.name) / f"{self._testMethodName}.sqlite3"
+        shutil.copyfile(self.base_path, self.path)
         self.settings = DashboardSettings(
             discord_client_id="public-client-id",
             discord_client_secret="never-render-this-secret",
@@ -80,18 +101,20 @@ class DashboardWebTests(unittest.TestCase):
             cookie_secure=False,
             scheduler_enabled=False,
         )
-        self.service = DashboardService.from_database(self.path, INSTITUTION)
-        self.service.control.create_shop(
-            INSTITUTION, "LUCAS_STORE", "Boutique Lucas", "USER", "42",
-            administrator_id=100, license_required=True,
-            auto_restock_allowed=True,
+        self.service = DashboardService(
+            EconomyControlService(
+                LedgerStore(self.path), InventoryService(InventoryStore(self.path)),
+                ShopStore(self.path),
+            ),
+            ProductionScheduleStore(self.path),
+            INSTITUTION,
         )
         self.app = create_app(self.settings, self.service, FakeOAuth(self.settings))
         self.client = ASGIClient(self.app)
 
     def tearDown(self) -> None:
         self.client.close()
-        self.tempdir.cleanup()
+        self.path.unlink(missing_ok=True)
 
     def login(self, code: str = "owner"):
         begin = self.client.get("/auth/discord", follow_redirects=False)
