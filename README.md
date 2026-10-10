@@ -27,17 +27,42 @@ couvert, dépensable et créé à zéro lors de `m!bankinit`. La trésorerie ne 
 pas de monnaie : elle reçoit ou verse uniquement des crédits déjà présents dans
 le ledger couvert.
 
+## Interface d'argent — Phase 3
+
+L'interface utilisateur distingue deux concepts simples :
+
+- **argent sur soi** : le solde Red Bank ; Red reste son unique source de
+  vérité ;
+- **compte bancaire** : le solde du ledger couvert M Corp.
+
+`m!argent` les affiche ensemble. `m!inventaire` rappelle aussi le liquide pour
+l'expérience utilisateur, mais ne l'enregistre jamais dans les tables
+d'inventaire.
+
+Les transferts ont deux significations volontairement distinctes :
+
+- `m!donner @membre 100R` est un don direct de liquide Red Bank ;
+- `m!donner @membre immunity [quantité]` est un transfert d'objet ;
+- `m!payer @membre 100` est un paiement entre comptes bancaires M Corp ;
+- `m!payer mcorp 100` est un paiement bancaire vers la trésorerie M Corp.
+
+La forme liquide est strictement `100R` (sans espace) afin de ne pas être
+ambiguë avec un identifiant d'objet. Les dons de liquide ne figurent pas dans
+l'historique bancaire utilisateur : ils sont toutefois consignés dans le
+journal interne du ledger (`PLAYER_CASH_TRANSFER`). Les transferts d'objets
+disposent de leur propre journal d'inventaire.
+
 ## Commandes
 
-- `m!solde` : portefeuille Red Bank.
-- `m!compte` : portefeuille Red et compte bancaire M Corp.
+- `m!argent` : argent sur soi et compte bancaire.
+- `m!inventaire` : liquide Red affiché et objets possédés.
 - `m!depot <montant>` : transfert du portefeuille Red vers le coffre et crédit
   du ledger.
 - `m!retrait <montant>` : opération inverse.
-- `m!payer @membre <montant>` : paiement direct en R-crédits via Red Bank.
-- `m!virement @membre <montant>` : transfert entre comptes M Corp, sans
-  mouvement du coffre.
-- `m!payermcorp <montant>` : transfert bancaire interne vers la trésorerie.
+- `m!donner @membre <100R|objet> [quantité]` : don direct de liquide ou objet.
+- `m!payer @membre <montant>` : transfert entre comptes M Corp, sans mouvement
+  du coffre.
+- `m!payer mcorp <montant>` : transfert bancaire interne vers la trésorerie.
 - `m!tresorerie` : solde de trésorerie et réconciliation publique minimale.
 - `m!prime @membre <montant>` : versement owner-only depuis la trésorerie.
 - `m!transactions` : dix dernières opérations pertinentes.
@@ -48,6 +73,43 @@ le ledger couvert.
 - `m!bankcheck` : réconciliation propriétaire : coffre Red, total du ledger,
   différence et état.
 - `m!economycheck` : statistiques owner-only des flux institutionnels.
+- `m!itemgrant @membre <objet> [quantité]`, `m!itemremove @membre <objet>
+  [quantité]`, `m!iteminspect @membre` : administration owner-only minimale de
+  l'inventaire.
+
+Les commandes historiques `m!solde`, `m!compte`, `m!virement` et
+`m!payermcorp` restent temporairement disponibles et indiquent la commande de
+remplacement. **Breaking change :** `m!payer` ne transfère plus de liquide ;
+utilisez désormais `m!donner @membre 100R`.
+
+## Inventaire générique — Phase 3
+
+Le catalogue versionné dans `mcorp/catalog.py` répond à « quels objets
+existent ? ». Il définit aujourd'hui `ticket_silence`, `immunity`, `maro` et
+`rename`, avec `display_name`, description, transférabilité, empilabilité et
+consommabilité. Aucun effet gameplay n'est implémenté.
+
+L'inventaire répond séparément à « qui possède combien ? ». Chaque ligne est
+identifiée par `(owner_type, owner_id, item_id)`. Les types utilisés sont
+`USER`, `SYSTEM` et `SHOP`; le schéma accepte de futurs types tels que
+`COMPANY` ou `NPC` sans migration. Par exemple, le backend peut gérer
+`SYSTEM/M_CORP` et `SHOP/GENERAL_STORE`, mais aucune boutique ou prix n'est
+encore exposé.
+
+Les tables `inventory_items` et `inventory_transactions` vivent dans le même
+`ledger.sqlite3` persistant du cog : il n'y a donc pas de second système de
+persistance. Elles sont indépendantes des tables de compte bancaire. Un
+transfert exécute débit source, crédit destination et écriture `ITEM_TRANSFER`
+dans une unique transaction SQLite. Les opérations administratives écrivent
+`ITEM_ADMIN_GRANT` ou `ITEM_ADMIN_REMOVE`; les types futurs
+`ITEM_PURCHASE`, `ITEM_USE` et `ITEM_RESTOCK` sont réservés au journal.
+
+Les quantités sont strictement positives à l'entrée et protégées par
+`CHECK (quantity >= 0)` en base. Un objet non transférable est refusé ; un
+objet non empilable ne peut exister qu'en un exemplaire par inventaire. Les
+migrations sont additives via `CREATE TABLE IF NOT EXISTS` : les données du
+ledger existant sont préservées. Le prototype historique `bot.py`,
+`database.py` et `mcorp.db` n'est ni lu, ni modifié, ni migré.
 
 ## Trésorerie institutionnelle — Phase 2
 
@@ -98,7 +160,7 @@ de Red, et ne relancez pas le cog dans l'espoir de remettre le coffre à zéro :
 ces actions pourraient détruire des fonds légitimes. Corrigez l'ambiguïté
 manuellement, puis vérifiez avec `m!bankcheck`.
 
-Les opérations couvertes (`m!depot`, `m!retrait`, `m!virement`) sont refusées
+Les opérations couvertes (`m!depot`, `m!retrait`, `m!payer`) sont refusées
 tant que cette procédure n'est pas terminée. `m!bankcheck` reste toujours
 disponible pour le diagnostic et affiche les montants réels, sans masquer un
 solde initial.
