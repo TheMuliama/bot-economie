@@ -455,17 +455,24 @@ class EconomyControlService:
     def item_permissions(self, institution_id: str) -> list[dict[str, Any]]:
         return self.shops.list_item_permissions(institution_id)
 
+    def license_stock_rules(self, institution_id: str, shop_id: str) -> dict[str, int]:
+        self._shop(institution_id, shop_id)
+        return self.shops.license_stock_rules(institution_id, shop_id)
+
     def inventory_distribution(self):
         return self.inventory.store.inventory_distribution()
 
     def audit_events(
         self, institution_id: str, *, actor_id: str | None = None,
         shop_id: str | None = None, event_type: str | None = None,
-        status: str | None = None, since: str | None = None, limit: int = 200,
+        status: str | None = None, since: str | None = None,
+        user_id: str | None = None, transaction_id: str | None = None,
+        limit: int = 200,
     ) -> list[ControlEvent]:
         return self.shops.find_events(
             institution_id, actor_id=actor_id, shop_id=shop_id,
-            event_type=event_type, status=status, since=since, limit=limit,
+            event_type=event_type, status=status, since=since,
+            user_id=user_id, transaction_id=transaction_id, limit=limit,
         )
 
     def configure_shop(

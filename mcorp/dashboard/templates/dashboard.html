@@ -1,0 +1,12 @@
+{% extends "base.html" %}{% block content %}
+<h1>État de l’économie</h1>
+<div class="cards">
+  <article><span>RTC couverts</span><strong>{{ overview.money.total_cash_backed }}</strong></article>
+  <article><span>Trésorerie</span><strong>{{ overview.money.treasury_balance }}</strong></article>
+  <article><span>Joueurs</span><strong>{{ overview.money.player_balance }}</strong></article>
+  <article><span>Boutiques</span><strong>{{ overview.money.shop_balance }}</strong></article>
+</div>
+<section><h2>Réconciliation Red Bank</h2>{% if overview.reconciliation %}<div class="reconcile"><span>Coffre {{ overview.reconciliation.vault_balance }}</span><span>Ledger {{ overview.reconciliation.ledger_balance }}</span><span>Différence {{ '%+d'|format(overview.reconciliation.difference) }}</span><span class="badge {{ 'ok' if overview.reconciliation.is_reconciled else 'critical' }}">{{ 'OK' if overview.reconciliation.is_reconciled else 'ANOMALIE' }}</span></div>{% else %}<p class="warning">Aucun snapshot. Exécuter un contrôle bancaire côté bot.</p>{% endif %}</section>
+<div class="cards compact"><article><span>Boutiques actives</span><strong>{{ overview.active_shops }}</strong></article><article><span>Licences expirées</span><strong>{{ overview.expired_licenses }}</strong></article><article><span>Restocks en erreur</span><strong>{{ overview.restock_errors }}</strong></article><article><span>Recovery required</span><strong>{{ overview.recovery_required }}</strong></article></div>
+<section><h2>Objets</h2><table><thead><tr><th>Objet</th><th>Produit</th><th>M Corp</th><th>Boutiques</th><th>Joueurs</th></tr></thead><tbody>{% for item in overview['items'] %}<tr><td>{{ item.item_id }}</td><td>{{ item.produced_total }}</td><td>{{ item.mcorp_stock }}</td><td>{{ item.shop_stock }}</td><td>{{ item.player_stock }}</td></tr>{% else %}<tr><td colspan="5">Aucun stock.</td></tr>{% endfor %}</tbody></table></section>
+{% endblock %}

@@ -298,6 +298,10 @@ class MCorp(commands.Cog):
         except Exception as exc:
             await self._send_operation_error(ctx, exc)
             return
+        self.control.record_reconciliation_snapshot(
+            institution_id, report.reconciliation.vault_balance,
+            checked_by=str(ctx.author.id),
+        )
         currency = await bank.get_currency_name(ctx.guild)
         state = "OK" if report.reconciliation.is_balanced else "ANOMALIE"
         await ctx.send(
@@ -443,6 +447,9 @@ class MCorp(commands.Cog):
         """[Propriétaire] Vérifie que le coffre Red couvre le ledger M Corp."""
         institution_id, vault = await self._bank_context(ctx)
         report = await self.banking.reconcile(institution_id, vault)
+        self.control.record_reconciliation_snapshot(
+            institution_id, report.vault_balance, checked_by=str(ctx.author.id)
+        )
         currency = await bank.get_currency_name(ctx.guild)
         state = "OK" if report.is_balanced else "ANOMALIE"
         await ctx.send(
@@ -464,6 +471,10 @@ class MCorp(commands.Cog):
         except Exception as exc:
             await self._send_operation_error(ctx, exc)
             return
+        self.control.record_reconciliation_snapshot(
+            institution_id, report.reconciliation.vault_balance,
+            checked_by=str(ctx.author.id),
+        )
         currency = await bank.get_currency_name(ctx.guild)
         state = "OK" if report.reconciliation.is_balanced else "ANOMALIE"
         await ctx.send(
