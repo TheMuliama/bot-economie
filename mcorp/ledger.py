@@ -18,6 +18,9 @@ from typing import Any, Iterable
 DEFAULT_INSTITUTION_ID = "mcorp"
 USER_OWNER_TYPE = "USER"
 CHECKING_ACCOUNT_TYPE = "CHECKING"
+SYSTEM_OWNER_TYPE = "SYSTEM"
+TREASURY_ACCOUNT_TYPE = "TREASURY"
+TREASURY_OWNER_ID = "M_CORP_TREASURY"
 ACTIVE_ACCOUNT_STATUS = "ACTIVE"
 
 
@@ -35,6 +38,7 @@ class Account:
     balance: int
     created_at: str
     status: str
+    is_cash_backed: bool
 
 
 @dataclass(frozen=True)
@@ -55,6 +59,18 @@ class InstitutionInitialization:
     vault_owner_id: str
     initial_vault_balance: int
     initialized_at: str
+
+
+@dataclass(frozen=True)
+class EconomyStats:
+    treasury_balance: int
+    total_received: int
+    total_paid: int
+    operation_count: int
+
+    @property
+    def net_flow(self) -> int:
+        return self.total_received - self.total_paid
 
 
 class LedgerStore:
@@ -122,6 +138,14 @@ class LedgerStore:
                     ON transaction_participants(owner_id, transaction_id);
                 """
             )
+            self._migrate_cash_backed_accounts(connection)
+            # Existing Phase 1 institutions may already be initialized. Give
+            # each one its zero-valued covered treasury without changing any
+            # historical account or transaction.
+            for row in connection.execute(
+                "SELECT institution_id FROM institution_initializations"
+            ):
+                self._get_or_create_treasury_account(connection, str(row["institution_id"]))
 
     def ensure_institution(
         self, institution_id: str, name: str, vault_owner_id: int
@@ -169,6 +193,7 @@ class LedgerStore:
                 """,
                 (institution_id, str(vault_owner_id), initial_vault_balance, _utc_now()),
             )
+            self._get_or_create_treasury_account(connection, institution_id)
         initialization = self.get_initialization(institution_id)
         assert initialization is not None
         return initialization
@@ -194,6 +219,28 @@ class LedgerStore:
                     USER_OWNER_TYPE,
                     str(user_id),
                     CHECKING_ACCOUNT_TYPE,
+                    ACTIVE_ACCOUNT_STATUS,
+                ),
+            ).fetchone()
+        return 0 if row is None else int(row["balance"])
+
+    def get_or_create_treasury_account(self, institution_id: str) -> Account:
+        with self._connection() as connection:
+            return self._get_or_create_treasury_account(connection, institution_id)
+
+    def get_treasury_balance(self, institution_id: str) -> int:
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT balance FROM accounts
+                WHERE institution_id = ? AND owner_type = ? AND owner_id = ?
+                  AND account_type = ? AND status = ?
+                """,
+                (
+                    institution_id,
+                    SYSTEM_OWNER_TYPE,
+                    TREASURY_OWNER_ID,
+                    TREASURY_ACCOUNT_TYPE,
                     ACTIVE_ACCOUNT_STATUS,
                 ),
             ).fetchone()
@@ -281,6 +328,50 @@ class LedgerStore:
             )
             return (source.balance - amount, destination.balance + amount)
 
+    def record_player_to_treasury(
+        self, institution_id: str, user_id: int, amount: int, metadata: dict[str, Any] | None = None
+    ) -> tuple[int, int]:
+        """Atomically transfer covered credits from a user to M Corp's treasury."""
+        self._require_positive_amount(amount)
+        with self._connection() as connection:
+            source = self._get_or_create_user_account(connection, institution_id, user_id)
+            if source.balance < amount:
+                raise InsufficientLedgerFunds(source.balance, amount)
+            treasury = self._get_or_create_treasury_account(connection, institution_id)
+            self._transfer_between_accounts(
+                connection,
+                institution_id=institution_id,
+                transaction_type="PLAYER_TO_TREASURY",
+                amount=amount,
+                source=source,
+                destination=treasury,
+                participants=(user_id, TREASURY_OWNER_ID),
+                metadata=metadata,
+            )
+            return (source.balance - amount, treasury.balance + amount)
+
+    def record_treasury_to_player(
+        self, institution_id: str, user_id: int, amount: int, metadata: dict[str, Any] | None = None
+    ) -> tuple[int, int]:
+        """Atomically transfer covered credits from treasury to a user."""
+        self._require_positive_amount(amount)
+        with self._connection() as connection:
+            treasury = self._get_or_create_treasury_account(connection, institution_id)
+            if treasury.balance < amount:
+                raise InsufficientLedgerFunds(treasury.balance, amount)
+            destination = self._get_or_create_user_account(connection, institution_id, user_id)
+            self._transfer_between_accounts(
+                connection,
+                institution_id=institution_id,
+                transaction_type="TREASURY_TO_PLAYER",
+                amount=amount,
+                source=treasury,
+                destination=destination,
+                participants=(TREASURY_OWNER_ID, user_id),
+                metadata=metadata,
+            )
+            return (treasury.balance - amount, destination.balance + amount)
+
     def record_cash_event(
         self,
         institution_id: str,
@@ -320,6 +411,7 @@ class LedgerStore:
         )
 
     def total_balance(self, institution_id: str) -> int:
+        """Return all active ledger balances, including future non-covered accounts."""
         with self._connection() as connection:
             row = connection.execute(
                 """
@@ -330,6 +422,43 @@ class LedgerStore:
                 (institution_id, ACTIVE_ACCOUNT_STATUS),
             ).fetchone()
         return int(row["total"])
+
+    def total_cash_backed_balance(self, institution_id: str) -> int:
+        """Return active liabilities which must be covered by the Red vault."""
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT COALESCE(SUM(balance), 0) AS total
+                FROM accounts
+                WHERE institution_id = ? AND status = ? AND is_cash_backed = 1
+                """,
+                (institution_id, ACTIVE_ACCOUNT_STATUS),
+            ).fetchone()
+        return int(row["total"])
+
+    def economy_stats(self, institution_id: str) -> EconomyStats:
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    COALESCE(SUM(CASE WHEN transaction_type = 'PLAYER_TO_TREASURY'
+                        AND status = 'COMPLETED' THEN amount ELSE 0 END), 0) AS received,
+                    COALESCE(SUM(CASE WHEN transaction_type = 'TREASURY_TO_PLAYER'
+                        AND status = 'COMPLETED' THEN amount ELSE 0 END), 0) AS paid,
+                    COALESCE(SUM(CASE WHEN transaction_type IN (
+                        'PLAYER_TO_TREASURY', 'TREASURY_TO_PLAYER'
+                    ) AND status = 'COMPLETED' THEN 1 ELSE 0 END), 0) AS operations
+                FROM ledger_transactions
+                WHERE institution_id = ?
+                """,
+                (institution_id,),
+            ).fetchone()
+        return EconomyStats(
+            treasury_balance=self.get_treasury_balance(institution_id),
+            total_received=int(row["received"]),
+            total_paid=int(row["paid"]),
+            operation_count=int(row["operations"]),
+        )
 
     def recent_transactions(
         self, institution_id: str, user_id: int, limit: int = 10
@@ -375,8 +504,9 @@ class LedgerStore:
             connection.execute(
                 """
                 INSERT INTO accounts (
-                    owner_id, owner_type, institution_id, account_type, balance, created_at, status
-                ) VALUES (?, ?, ?, ?, 0, ?, ?)
+                    owner_id, owner_type, institution_id, account_type, balance, created_at, status,
+                    is_cash_backed
+                ) VALUES (?, ?, ?, ?, 0, ?, ?, 1)
                 """,
                 (
                     str(user_id),
@@ -390,6 +520,85 @@ class LedgerStore:
             row = connection.execute("SELECT * FROM accounts WHERE account_id = last_insert_rowid()").fetchone()
         return self._account_from_row(row)
 
+    def _get_or_create_treasury_account(
+        self, connection: sqlite3.Connection, institution_id: str
+    ) -> Account:
+        row = connection.execute(
+            """
+            SELECT * FROM accounts
+            WHERE institution_id = ? AND owner_type = ? AND owner_id = ?
+              AND account_type = ? AND status = ?
+            """,
+            (
+                institution_id,
+                SYSTEM_OWNER_TYPE,
+                TREASURY_OWNER_ID,
+                TREASURY_ACCOUNT_TYPE,
+                ACTIVE_ACCOUNT_STATUS,
+            ),
+        ).fetchone()
+        if row is None:
+            connection.execute(
+                """
+                INSERT INTO accounts (
+                    owner_id, owner_type, institution_id, account_type, balance, created_at, status,
+                    is_cash_backed
+                ) VALUES (?, ?, ?, ?, 0, ?, ?, 1)
+                """,
+                (
+                    TREASURY_OWNER_ID,
+                    SYSTEM_OWNER_TYPE,
+                    institution_id,
+                    TREASURY_ACCOUNT_TYPE,
+                    _utc_now(),
+                    ACTIVE_ACCOUNT_STATUS,
+                ),
+            )
+            row = connection.execute("SELECT * FROM accounts WHERE account_id = last_insert_rowid()").fetchone()
+        return self._account_from_row(row)
+
+    def _migrate_cash_backed_accounts(self, connection: sqlite3.Connection) -> None:
+        columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(accounts)").fetchall()
+        }
+        if "is_cash_backed" not in columns:
+            connection.execute(
+                "ALTER TABLE accounts ADD COLUMN is_cash_backed INTEGER NOT NULL DEFAULT 1 "
+                "CHECK (is_cash_backed IN (0, 1))"
+            )
+
+    def _transfer_between_accounts(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        institution_id: str,
+        transaction_type: str,
+        amount: int,
+        source: Account,
+        destination: Account,
+        participants: Iterable[int | str],
+        metadata: dict[str, Any] | None,
+    ) -> None:
+        connection.execute(
+            "UPDATE accounts SET balance = balance - ? WHERE account_id = ?",
+            (amount, source.account_id),
+        )
+        connection.execute(
+            "UPDATE accounts SET balance = balance + ? WHERE account_id = ?",
+            (amount, destination.account_id),
+        )
+        self._insert_transaction(
+            connection,
+            institution_id=institution_id,
+            transaction_type=transaction_type,
+            amount=amount,
+            source_account_id=source.account_id,
+            destination_account_id=destination.account_id,
+            participants=participants,
+            metadata=metadata,
+        )
+
     @staticmethod
     def _require_positive_amount(amount: int) -> None:
         if not isinstance(amount, int) or amount <= 0:
@@ -402,7 +611,7 @@ class LedgerStore:
         institution_id: str,
         transaction_type: str,
         amount: int,
-        participants: Iterable[int],
+        participants: Iterable[int | str],
         source_account_id: int | None = None,
         destination_account_id: int | None = None,
         metadata: dict[str, Any] | None = None,
@@ -444,6 +653,7 @@ class LedgerStore:
             balance=int(row["balance"]),
             created_at=str(row["created_at"]),
             status=str(row["status"]),
+            is_cash_backed=bool(row["is_cash_backed"]),
         )
 
     @staticmethod

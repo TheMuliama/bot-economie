@@ -6,7 +6,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from .ledger import InsufficientLedgerFunds, InvalidAmount, LedgerStore, SameAccountTransfer
+from .ledger import EconomyStats, InsufficientLedgerFunds, InvalidAmount, LedgerStore, SameAccountTransfer
 
 
 class BankGateway(Protocol):
@@ -31,6 +31,12 @@ class Reconciliation:
     @property
     def is_balanced(self) -> bool:
         return self.difference == 0
+
+
+@dataclass(frozen=True)
+class EconomyReport:
+    stats: EconomyStats
+    reconciliation: Reconciliation
 
 
 class BankingOperationError(Exception):
@@ -161,6 +167,36 @@ class BankingService:
                 {"initiator_id": source.id},
             )
 
+    async def pay_treasury(
+        self, institution_id: str, player: Any, vault: Any, amount: int
+    ) -> tuple[int, int]:
+        """Move covered credits from a player account to M Corp treasury."""
+        self._require_positive_amount(amount)
+        async with self._operation_lock:
+            self._require_initialized(institution_id)
+            await self._require_invariant(institution_id, vault)
+            return self.ledger.record_player_to_treasury(
+                institution_id,
+                player.id,
+                amount,
+                {"initiator_id": player.id},
+            )
+
+    async def pay_from_treasury(
+        self, institution_id: str, recipient: Any, vault: Any, amount: int, *, administrator: Any
+    ) -> tuple[int, int]:
+        """Move covered treasury credits to a player without touching Red Bank."""
+        self._require_positive_amount(amount)
+        async with self._operation_lock:
+            self._require_initialized(institution_id)
+            await self._require_invariant(institution_id, vault)
+            return self.ledger.record_treasury_to_player(
+                institution_id,
+                recipient.id,
+                amount,
+                {"administrator_id": administrator.id, "recipient_id": recipient.id},
+            )
+
     async def cash_transfer(
         self, institution_id: str, source: Any, destination: Any, amount: int
     ) -> None:
@@ -249,7 +285,19 @@ class BankingService:
         async with self._operation_lock:
             return Reconciliation(
                 vault_balance=await self.bank.get_balance(vault),
-                ledger_total=self.ledger.total_balance(institution_id),
+                ledger_total=self.ledger.total_cash_backed_balance(institution_id),
+            )
+
+    async def economy_report(self, institution_id: str, vault: Any) -> EconomyReport:
+        async with self._operation_lock:
+            self._require_initialized(institution_id)
+            reconciliation = Reconciliation(
+                vault_balance=await self.bank.get_balance(vault),
+                ledger_total=self.ledger.total_cash_backed_balance(institution_id),
+            )
+            return EconomyReport(
+                stats=self.ledger.economy_stats(institution_id),
+                reconciliation=reconciliation,
             )
 
     async def initialize_institution(
@@ -269,7 +317,7 @@ class BankingService:
         async with self._operation_lock:
             if self.ledger.get_initialization(institution_id) is not None:
                 raise AlreadyInitialized()
-            ledger_total = self.ledger.total_balance(institution_id)
+            ledger_total = self.ledger.total_cash_backed_balance(institution_id)
             if ledger_total != 0:
                 raise InitializationRefused("Le ledger contient déjà des soldes.")
             if self.ledger.transaction_count(institution_id) != 0:
@@ -309,7 +357,7 @@ class BankingService:
 
             return Reconciliation(
                 vault_balance=await self.bank.get_balance(vault),
-                ledger_total=self.ledger.total_balance(institution_id),
+                ledger_total=self.ledger.total_cash_backed_balance(institution_id),
             )
 
     @staticmethod
@@ -324,7 +372,7 @@ class BankingService:
     async def _require_invariant(self, institution_id: str, vault: Any) -> None:
         report = Reconciliation(
             vault_balance=await self.bank.get_balance(vault),
-            ledger_total=self.ledger.total_balance(institution_id),
+            ledger_total=self.ledger.total_cash_backed_balance(institution_id),
         )
         if not report.is_balanced:
             raise InvariantViolation(report)

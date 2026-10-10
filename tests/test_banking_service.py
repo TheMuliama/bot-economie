@@ -6,7 +6,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from mcorp.ledger import InsufficientLedgerFunds, InvalidAmount, LedgerStore, SameAccountTransfer
+from mcorp.ledger import (
+    SYSTEM_OWNER_TYPE,
+    TREASURY_ACCOUNT_TYPE,
+    InsufficientLedgerFunds,
+    InvalidAmount,
+    LedgerStore,
+    SameAccountTransfer,
+)
 from mcorp.service import (
     AlreadyInitialized,
     BankingOperationError,
@@ -140,6 +147,95 @@ class BankingServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.bank.balances[self.vault.id], total_before)
         self.assertTrue((await self.service.reconcile(INSTITUTION_ID, self.vault)).is_balanced)
 
+    async def test_initialized_institution_has_a_zero_covered_treasury(self) -> None:
+        treasury = self.ledger.get_or_create_treasury_account(INSTITUTION_ID)
+
+        self.assertEqual(treasury.balance, 0)
+        self.assertEqual(treasury.owner_type, SYSTEM_OWNER_TYPE)
+        self.assertEqual(treasury.account_type, TREASURY_ACCOUNT_TYPE)
+        self.assertTrue(treasury.is_cash_backed)
+
+    async def test_player_payment_to_treasury_conserves_vault_and_ledger(self) -> None:
+        await self.service.deposit(INSTITUTION_ID, self.alice, self.vault, 300)
+        vault_before = self.bank.balances[self.vault.id]
+        total_before = self.ledger.total_cash_backed_balance(INSTITUTION_ID)
+
+        player_balance, treasury_balance = await self.service.pay_treasury(
+            INSTITUTION_ID, self.alice, self.vault, 50
+        )
+
+        self.assertEqual((player_balance, treasury_balance), (250, 50))
+        self.assertEqual(self.bank.balances[self.vault.id], vault_before)
+        self.assertEqual(self.ledger.total_cash_backed_balance(INSTITUTION_ID), total_before)
+        self.assertTrue((await self.service.reconcile(INSTITUTION_ID, self.vault)).is_balanced)
+        entries = self.ledger.recent_transactions(INSTITUTION_ID, self.alice.id)
+        self.assertEqual(entries[0].transaction_type, "PLAYER_TO_TREASURY")
+        self.assertIsNotNone(entries[0].source_account_id)
+        self.assertIsNotNone(entries[0].destination_account_id)
+
+    async def test_player_payment_above_balance_is_refused(self) -> None:
+        await self.service.deposit(INSTITUTION_ID, self.alice, self.vault, 30)
+
+        with self.assertRaises(InsufficientLedgerFunds):
+            await self.service.pay_treasury(INSTITUTION_ID, self.alice, self.vault, 31)
+
+        self.assertEqual(self.ledger.get_treasury_balance(INSTITUTION_ID), 0)
+
+    async def test_treasury_payment_to_player_conserves_vault_and_ledger(self) -> None:
+        await self.service.deposit(INSTITUTION_ID, self.alice, self.vault, 300)
+        await self.service.pay_treasury(INSTITUTION_ID, self.alice, self.vault, 100)
+        vault_before = self.bank.balances[self.vault.id]
+        total_before = self.ledger.total_cash_backed_balance(INSTITUTION_ID)
+
+        treasury_balance, player_balance = await self.service.pay_from_treasury(
+            INSTITUTION_ID, self.bob, self.vault, 40, administrator=self.alice
+        )
+
+        self.assertEqual((treasury_balance, player_balance), (60, 40))
+        self.assertEqual(self.bank.balances[self.vault.id], vault_before)
+        self.assertEqual(self.ledger.total_cash_backed_balance(INSTITUTION_ID), total_before)
+        self.assertTrue((await self.service.reconcile(INSTITUTION_ID, self.vault)).is_balanced)
+        entries = self.ledger.recent_transactions(INSTITUTION_ID, self.bob.id)
+        self.assertEqual(entries[0].transaction_type, "TREASURY_TO_PLAYER")
+
+    async def test_treasury_cannot_pay_above_its_balance(self) -> None:
+        with self.assertRaises(InsufficientLedgerFunds):
+            await self.service.pay_from_treasury(
+                INSTITUTION_ID, self.alice, self.vault, 1, administrator=self.bob
+            )
+
+    async def test_institutional_payments_reject_zero_and_negative_amounts(self) -> None:
+        for amount in (0, -1):
+            with self.assertRaises(InvalidAmount):
+                await self.service.pay_treasury(INSTITUTION_ID, self.alice, self.vault, amount)
+            with self.assertRaises(InvalidAmount):
+                await self.service.pay_from_treasury(
+                    INSTITUTION_ID, self.alice, self.vault, amount, administrator=self.bob
+                )
+
+    async def test_economy_statistics_track_completed_institutional_flows(self) -> None:
+        await self.service.deposit(INSTITUTION_ID, self.alice, self.vault, 300)
+        await self.service.pay_treasury(INSTITUTION_ID, self.alice, self.vault, 100)
+        await self.service.pay_from_treasury(
+            INSTITUTION_ID, self.bob, self.vault, 40, administrator=self.alice
+        )
+
+        report = await self.service.economy_report(INSTITUTION_ID, self.vault)
+
+        self.assertEqual(report.stats.treasury_balance, 60)
+        self.assertEqual(report.stats.total_received, 100)
+        self.assertEqual(report.stats.total_paid, 40)
+        self.assertEqual(report.stats.net_flow, 60)
+        self.assertEqual(report.stats.operation_count, 2)
+        self.assertTrue(report.reconciliation.is_balanced)
+
+    async def test_institutional_payment_refuses_uninitialized_institution(self) -> None:
+        institution_id = "mcorp:guild:uninitialized-treasury"
+        self.ledger.ensure_institution(institution_id, "New M Corp", self.vault.id)
+
+        with self.assertRaises(InstitutionNotInitialized):
+            await self.service.pay_treasury(institution_id, self.alice, self.vault, 1)
+
     async def test_operations_refuse_a_preexisting_vault_anomaly(self) -> None:
         self.bank.balances[self.vault.id] = 10
 
@@ -248,6 +344,49 @@ class BankingServiceTests(unittest.IsolatedAsyncioTestCase):
             """)
         legacy.initialize()
         self.assertIsNone(legacy.get_initialization(INSTITUTION_ID))
+
+    def test_initialized_v1_accounts_are_migrated_as_cash_backed_without_data_loss(self) -> None:
+        import sqlite3
+
+        legacy = LedgerStore(Path(self.tempdir.name) / "phase1.sqlite3")
+        with sqlite3.connect(legacy.database_path) as connection:
+            connection.executescript("""
+                CREATE TABLE institutions (institution_id TEXT PRIMARY KEY, name TEXT NOT NULL,
+                    vault_owner_id TEXT NOT NULL, created_at TEXT NOT NULL);
+                CREATE TABLE accounts (account_id INTEGER PRIMARY KEY AUTOINCREMENT, owner_id TEXT NOT NULL,
+                    owner_type TEXT NOT NULL, institution_id TEXT NOT NULL, account_type TEXT NOT NULL,
+                    balance INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'ACTIVE');
+                CREATE TABLE ledger_transactions (transaction_id TEXT PRIMARY KEY, institution_id TEXT NOT NULL,
+                    transaction_type TEXT NOT NULL, amount INTEGER NOT NULL, source_account_id INTEGER,
+                    destination_account_id INTEGER, created_at TEXT NOT NULL, status TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL DEFAULT '{}');
+                CREATE TABLE transaction_participants (transaction_id TEXT NOT NULL, owner_id TEXT NOT NULL,
+                    PRIMARY KEY (transaction_id, owner_id));
+                CREATE TABLE institution_initializations (institution_id TEXT PRIMARY KEY,
+                    vault_owner_id TEXT NOT NULL, initial_vault_balance INTEGER NOT NULL, initialized_at TEXT NOT NULL);
+                INSERT INTO institutions VALUES ('mcorp:guild:1', 'M Corp test', '999', 'now');
+                INSERT INTO accounts (owner_id, owner_type, institution_id, account_type, balance, created_at, status)
+                    VALUES ('1', 'USER', 'mcorp:guild:1', 'CHECKING', 300, 'now', 'ACTIVE');
+                INSERT INTO institution_initializations VALUES ('mcorp:guild:1', '999', 0, 'now');
+            """)
+
+        legacy.initialize()
+
+        account = legacy.get_or_create_user_account(INSTITUTION_ID, self.alice.id)
+        self.assertEqual(account.balance, 300)
+        self.assertTrue(account.is_cash_backed)
+        self.assertEqual(legacy.total_cash_backed_balance(INSTITUTION_ID), 300)
+        self.assertEqual(legacy.get_treasury_balance(INSTITUTION_ID), 0)
+
+    def test_treasury_persists_after_ledger_reopen(self) -> None:
+        self.ledger.record_deposit(INSTITUTION_ID, self.alice.id, 100)
+        self.ledger.record_player_to_treasury(INSTITUTION_ID, self.alice.id, 25)
+
+        reopened = LedgerStore(self.ledger.database_path)
+        reopened.initialize()
+
+        self.assertEqual(reopened.get_treasury_balance(INSTITUTION_ID), 25)
+        self.assertEqual(reopened.total_cash_backed_balance(INSTITUTION_ID), 100)
 
     async def test_transactions_are_visible_to_the_relevant_user_only(self) -> None:
         await self.service.deposit(INSTITUTION_ID, self.alice, self.vault, 300)
