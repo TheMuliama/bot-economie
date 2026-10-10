@@ -17,6 +17,7 @@ from typing import Any, Iterable
 
 DEFAULT_INSTITUTION_ID = "mcorp"
 USER_OWNER_TYPE = "USER"
+SHOP_OWNER_TYPE = "SHOP"
 CHECKING_ACCOUNT_TYPE = "CHECKING"
 SYSTEM_OWNER_TYPE = "SYSTEM"
 TREASURY_ACCOUNT_TYPE = "TREASURY"
@@ -207,6 +208,9 @@ class LedgerStore:
         return int(row["count"])
 
     def get_user_balance(self, institution_id: str, user_id: int) -> int:
+        return self.get_owner_balance(institution_id, USER_OWNER_TYPE, str(user_id))
+
+    def get_owner_balance(self, institution_id: str, owner_type: str, owner_id: str) -> int:
         with self._connection() as connection:
             row = connection.execute(
                 """
@@ -216,13 +220,30 @@ class LedgerStore:
                 """,
                 (
                     institution_id,
-                    USER_OWNER_TYPE,
-                    str(user_id),
+                    owner_type,
+                    owner_id,
                     CHECKING_ACCOUNT_TYPE,
                     ACTIVE_ACCOUNT_STATUS,
                 ),
             ).fetchone()
         return 0 if row is None else int(row["balance"])
+
+    def get_or_create_shop_account(self, institution_id: str, shop_id: str) -> Account:
+        with self._connection() as connection:
+            return self._get_or_create_account(
+                connection, institution_id, SHOP_OWNER_TYPE, shop_id, CHECKING_ACCOUNT_TYPE
+            )
+
+    def balance_totals_by_owner_type(self, institution_id: str) -> dict[str, int]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                """SELECT owner_type, COALESCE(SUM(balance), 0) AS total
+                   FROM accounts
+                   WHERE institution_id = ? AND status = ? AND is_cash_backed = 1
+                   GROUP BY owner_type""",
+                (institution_id, ACTIVE_ACCOUNT_STATUS),
+            ).fetchall()
+        return {str(row["owner_type"]): int(row["total"]) for row in rows}
 
     def get_or_create_treasury_account(self, institution_id: str) -> Account:
         with self._connection() as connection:
@@ -372,6 +393,56 @@ class LedgerStore:
             )
             return (treasury.balance - amount, destination.balance + amount)
 
+    def record_shop_to_treasury(
+        self, institution_id: str, shop_id: str, amount: int,
+        metadata: dict[str, Any] | None = None,
+    ) -> tuple[int, int]:
+        """Atomically debit a covered shop account and credit M Corp treasury."""
+        self._require_positive_amount(amount)
+        with self._connection() as connection:
+            source = self._get_or_create_account(
+                connection, institution_id, SHOP_OWNER_TYPE, shop_id, CHECKING_ACCOUNT_TYPE
+            )
+            if source.balance < amount:
+                raise InsufficientLedgerFunds(source.balance, amount)
+            treasury = self._get_or_create_treasury_account(connection, institution_id)
+            self._transfer_between_accounts(
+                connection,
+                institution_id=institution_id,
+                transaction_type="SHOP_TO_TREASURY",
+                amount=amount,
+                source=source,
+                destination=treasury,
+                participants=(f"SHOP:{shop_id}", TREASURY_OWNER_ID),
+                metadata=metadata,
+            )
+            return source.balance - amount, treasury.balance + amount
+
+    def record_treasury_to_shop(
+        self, institution_id: str, shop_id: str, amount: int,
+        metadata: dict[str, Any] | None = None,
+    ) -> tuple[int, int]:
+        """Atomically return covered funds from treasury to a shop account."""
+        self._require_positive_amount(amount)
+        with self._connection() as connection:
+            treasury = self._get_or_create_treasury_account(connection, institution_id)
+            if treasury.balance < amount:
+                raise InsufficientLedgerFunds(treasury.balance, amount)
+            destination = self._get_or_create_account(
+                connection, institution_id, SHOP_OWNER_TYPE, shop_id, CHECKING_ACCOUNT_TYPE
+            )
+            self._transfer_between_accounts(
+                connection,
+                institution_id=institution_id,
+                transaction_type="TREASURY_TO_SHOP",
+                amount=amount,
+                source=treasury,
+                destination=destination,
+                participants=(TREASURY_OWNER_ID, f"SHOP:{shop_id}"),
+                metadata=metadata,
+            )
+            return treasury.balance - amount, destination.balance + amount
+
     def record_cash_event(
         self,
         institution_id: str,
@@ -512,6 +583,18 @@ class LedgerStore:
     def _get_or_create_user_account(
         self, connection: sqlite3.Connection, institution_id: str, user_id: int
     ) -> Account:
+        return self._get_or_create_account(
+            connection, institution_id, USER_OWNER_TYPE, str(user_id), CHECKING_ACCOUNT_TYPE
+        )
+
+    def _get_or_create_account(
+        self,
+        connection: sqlite3.Connection,
+        institution_id: str,
+        owner_type: str,
+        owner_id: str,
+        account_type: str,
+    ) -> Account:
         row = connection.execute(
             """
             SELECT * FROM accounts
@@ -520,9 +603,9 @@ class LedgerStore:
             """,
             (
                 institution_id,
-                USER_OWNER_TYPE,
-                str(user_id),
-                CHECKING_ACCOUNT_TYPE,
+                owner_type,
+                owner_id,
+                account_type,
                 ACTIVE_ACCOUNT_STATUS,
             ),
         ).fetchone()
@@ -535,10 +618,10 @@ class LedgerStore:
                 ) VALUES (?, ?, ?, ?, 0, ?, ?, 1)
                 """,
                 (
-                    str(user_id),
-                    USER_OWNER_TYPE,
+                    owner_id,
+                    owner_type,
                     institution_id,
-                    CHECKING_ACCOUNT_TYPE,
+                    account_type,
                     _utc_now(),
                     ACTIVE_ACCOUNT_STATUS,
                 ),
