@@ -49,6 +49,14 @@ class LedgerTransaction:
     metadata: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class InstitutionInitialization:
+    institution_id: str
+    vault_owner_id: str
+    initial_vault_balance: int
+    initialized_at: str
+
+
 class LedgerStore:
     """Small SQLite repository for accounts and immutable transaction records."""
 
@@ -97,6 +105,15 @@ class LedgerStore:
                     PRIMARY KEY (transaction_id, owner_id)
                 );
 
+                -- Kept separate from institutions so this is a compatible,
+                -- additive migration for Banking MVP V1 SQLite files.
+                CREATE TABLE IF NOT EXISTS institution_initializations (
+                    institution_id TEXT PRIMARY KEY REFERENCES institutions(institution_id),
+                    vault_owner_id TEXT NOT NULL,
+                    initial_vault_balance INTEGER NOT NULL CHECK (initial_vault_balance >= 0),
+                    initialized_at TEXT NOT NULL
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_accounts_institution
                     ON accounts(institution_id, status);
                 CREATE INDEX IF NOT EXISTS idx_transactions_institution_created
@@ -124,6 +141,45 @@ class LedgerStore:
     def get_or_create_user_account(self, institution_id: str, user_id: int) -> Account:
         with self._connection() as connection:
             return self._get_or_create_user_account(connection, institution_id, user_id)
+
+    def get_initialization(self, institution_id: str) -> InstitutionInitialization | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM institution_initializations WHERE institution_id = ?",
+                (institution_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return InstitutionInitialization(
+            institution_id=str(row["institution_id"]),
+            vault_owner_id=str(row["vault_owner_id"]),
+            initial_vault_balance=int(row["initial_vault_balance"]),
+            initialized_at=str(row["initialized_at"]),
+        )
+
+    def mark_initialized(
+        self, institution_id: str, vault_owner_id: int, initial_vault_balance: int
+    ) -> InstitutionInitialization:
+        with self._connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO institution_initializations (
+                    institution_id, vault_owner_id, initial_vault_balance, initialized_at
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (institution_id, str(vault_owner_id), initial_vault_balance, _utc_now()),
+            )
+        initialization = self.get_initialization(institution_id)
+        assert initialization is not None
+        return initialization
+
+    def transaction_count(self, institution_id: str) -> int:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS count FROM ledger_transactions WHERE institution_id = ?",
+                (institution_id,),
+            ).fetchone()
+        return int(row["count"])
 
     def get_user_balance(self, institution_id: str, user_id: int) -> int:
         with self._connection() as connection:

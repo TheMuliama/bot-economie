@@ -7,7 +7,17 @@ import unittest
 from pathlib import Path
 
 from mcorp.ledger import InsufficientLedgerFunds, InvalidAmount, LedgerStore, SameAccountTransfer
-from mcorp.service import BankingOperationError, BankingService, InvariantViolation, InsufficientCash
+from mcorp.service import (
+    AlreadyInitialized,
+    BankingOperationError,
+    BankingService,
+    InitialVaultBalanceRequiresConfirmation,
+    InitializationRefused,
+    InitializationRecoveryRequired,
+    InstitutionNotInitialized,
+    InvariantViolation,
+    InsufficientCash,
+)
 
 
 INSTITUTION_ID = "mcorp:guild:1"
@@ -22,6 +32,7 @@ class FakeBank:
     def __init__(self, balances: dict[int, int]) -> None:
         self.balances = balances.copy()
         self.fail_deposits_for: set[int] = set()
+        self.fail_set_balance_for: set[int] = set()
 
     async def get_balance(self, member: Member) -> int:
         return self.balances.get(member.id, 0)
@@ -38,6 +49,12 @@ class FakeBank:
             raise RuntimeError("simulated deposit failure")
         self.balances[member.id] = await self.get_balance(member) + amount
         return self.balances[member.id]
+
+    async def set_balance(self, member: Member, amount: int) -> int:
+        if member.id in self.fail_set_balance_for:
+            raise RuntimeError("simulated set-balance failure")
+        self.balances[member.id] = amount
+        return amount
 
 
 class FailingDepositLedger(LedgerStore):
@@ -61,6 +78,7 @@ class BankingServiceTests(unittest.IsolatedAsyncioTestCase):
         self.ledger.ensure_institution(INSTITUTION_ID, "M Corp test", self.vault.id)
         self.bank = FakeBank({self.alice.id: 1_000, self.bob.id: 200, self.vault.id: 0})
         self.service = BankingService(self.ledger, self.bank)
+        self.ledger.mark_initialized(INSTITUTION_ID, self.vault.id, 0)
 
     def tearDown(self) -> None:
         self.tempdir.cleanup()
@@ -131,6 +149,106 @@ class BankingServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.bank.balances[self.alice.id], 1_000)
         self.assertEqual(self.ledger.total_balance(INSTITUTION_ID), 0)
 
+    async def test_covered_operations_refuse_an_uninitialized_institution(self) -> None:
+        institution_id = "mcorp:guild:uninitialized"
+        self.ledger.ensure_institution(institution_id, "New M Corp", self.vault.id)
+
+        with self.assertRaises(InstitutionNotInitialized):
+            await self.service.deposit(institution_id, self.alice, self.vault, 10)
+
+    async def test_initial_default_balance_requires_explicit_confirmation(self) -> None:
+        institution_id = "mcorp:guild:initial-default"
+        self.ledger.ensure_institution(institution_id, "New M Corp", self.vault.id)
+        self.bank.balances[self.vault.id] = 100
+
+        with self.assertRaises(InitialVaultBalanceRequiresConfirmation):
+            await self.service.initialize_institution(
+                institution_id, self.vault, default_vault_balance=100
+            )
+        self.assertEqual(self.bank.balances[self.vault.id], 100)
+        self.assertIsNone(self.ledger.get_initialization(institution_id))
+
+    async def test_initialization_neutralizes_confirmed_default_and_reconciles(self) -> None:
+        institution_id = "mcorp:guild:initialization"
+        self.ledger.ensure_institution(institution_id, "New M Corp", self.vault.id)
+        self.bank.balances[self.vault.id] = 100
+
+        report = await self.service.initialize_institution(
+            institution_id,
+            self.vault,
+            default_vault_balance=100,
+            confirm_default_balance_reset=True,
+        )
+
+        self.assertTrue(report.is_balanced)
+        self.assertEqual(self.bank.balances[self.vault.id], 0)
+        self.assertEqual(self.ledger.get_initialization(institution_id).initial_vault_balance, 100)
+        await self.service.deposit(institution_id, self.alice, self.vault, 20)
+        self.assertTrue((await self.service.reconcile(institution_id, self.vault)).is_balanced)
+
+    async def test_initialization_cannot_be_repeated_or_reset_on_restart(self) -> None:
+        self.ledger = LedgerStore(Path(self.tempdir.name) / "restart.sqlite3")
+        self.ledger.initialize()
+        self.ledger.ensure_institution(INSTITUTION_ID, "M Corp test", self.vault.id)
+        service = BankingService(self.ledger, self.bank)
+        await service.initialize_institution(INSTITUTION_ID, self.vault, default_vault_balance=0)
+        self.bank.balances[self.vault.id] = 25
+
+        self.ledger.initialize()  # Represents a subsequent cog load.
+        self.assertEqual(self.bank.balances[self.vault.id], 25)
+        with self.assertRaises(AlreadyInitialized):
+            await service.initialize_institution(INSTITUTION_ID, self.vault, default_vault_balance=0)
+
+    async def test_initialization_refuses_existing_balance_or_transactions(self) -> None:
+        institution_id = "mcorp:guild:history"
+        self.ledger.ensure_institution(institution_id, "New M Corp", self.vault.id)
+        self.ledger.record_deposit(institution_id, self.alice.id, 1)
+        with self.assertRaises(InitializationRefused):
+            await self.service.initialize_institution(institution_id, self.vault, default_vault_balance=0)
+
+    async def test_initialization_refuses_unexplained_vault_balance(self) -> None:
+        institution_id = "mcorp:guild:unexplained"
+        self.ledger.ensure_institution(institution_id, "New M Corp", self.vault.id)
+        self.bank.balances[self.vault.id] = 101
+        with self.assertRaises(InitializationRefused):
+            await self.service.initialize_institution(
+                institution_id, self.vault, default_vault_balance=100, confirm_default_balance_reset=True
+            )
+
+    async def test_initialization_does_not_mark_when_red_reset_fails(self) -> None:
+        institution_id = "mcorp:guild:red-failure"
+        self.ledger.ensure_institution(institution_id, "New M Corp", self.vault.id)
+        self.bank.balances[self.vault.id] = 100
+        self.bank.fail_set_balance_for.add(self.vault.id)
+        with self.assertRaises(InitializationRecoveryRequired):
+            await self.service.initialize_institution(
+                institution_id, self.vault, default_vault_balance=100, confirm_default_balance_reset=True
+            )
+        self.assertEqual(self.bank.balances[self.vault.id], 100)
+        self.assertIsNone(self.ledger.get_initialization(institution_id))
+
+    def test_existing_v1_database_receives_additive_initialization_migration(self) -> None:
+        legacy = LedgerStore(Path(self.tempdir.name) / "legacy.sqlite3")
+        legacy.database_path.parent.mkdir(parents=True, exist_ok=True)
+        import sqlite3
+
+        with sqlite3.connect(legacy.database_path) as connection:
+            connection.executescript("""
+                CREATE TABLE institutions (institution_id TEXT PRIMARY KEY, name TEXT NOT NULL,
+                    vault_owner_id TEXT NOT NULL, created_at TEXT NOT NULL);
+                CREATE TABLE accounts (account_id INTEGER PRIMARY KEY AUTOINCREMENT, owner_id TEXT NOT NULL,
+                    owner_type TEXT NOT NULL, institution_id TEXT NOT NULL, account_type TEXT NOT NULL,
+                    balance INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'ACTIVE');
+                CREATE TABLE ledger_transactions (transaction_id TEXT PRIMARY KEY, institution_id TEXT NOT NULL,
+                    transaction_type TEXT NOT NULL, amount INTEGER NOT NULL, source_account_id INTEGER,
+                    destination_account_id INTEGER, created_at TEXT NOT NULL, status TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL DEFAULT '{}');
+                CREATE TABLE transaction_participants (transaction_id TEXT NOT NULL, owner_id TEXT NOT NULL,
+                    PRIMARY KEY (transaction_id, owner_id));
+            """)
+        legacy.initialize()
+        self.assertIsNone(legacy.get_initialization(INSTITUTION_ID))
+
     async def test_transactions_are_visible_to_the_relevant_user_only(self) -> None:
         await self.service.deposit(INSTITUTION_ID, self.alice, self.vault, 300)
         await self.service.bank_transfer(INSTITUTION_ID, self.alice, self.bob, self.vault, 100)
@@ -154,6 +272,7 @@ class BankingServiceTests(unittest.IsolatedAsyncioTestCase):
         failing_ledger = FailingDepositLedger(Path(self.tempdir.name) / "failing.sqlite3")
         failing_ledger.initialize()
         failing_ledger.ensure_institution(INSTITUTION_ID, "M Corp test", self.vault.id)
+        failing_ledger.mark_initialized(INSTITUTION_ID, self.vault.id, 0)
         service = BankingService(failing_ledger, self.bank)
 
         with self.assertRaises(BankingOperationError):
@@ -167,6 +286,7 @@ class BankingServiceTests(unittest.IsolatedAsyncioTestCase):
         failing_ledger = FailingWithdrawalLedger(Path(self.tempdir.name) / "failing.sqlite3")
         failing_ledger.initialize()
         failing_ledger.ensure_institution(INSTITUTION_ID, "M Corp test", self.vault.id)
+        failing_ledger.mark_initialized(INSTITUTION_ID, self.vault.id, 0)
         failing_ledger.record_deposit(INSTITUTION_ID, self.alice.id, 300)
         service = BankingService(failing_ledger, self.bank)
 

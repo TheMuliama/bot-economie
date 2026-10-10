@@ -16,6 +16,8 @@ class BankGateway(Protocol):
 
     async def deposit(self, member: Any, amount: int) -> int: ...
 
+    async def set_balance(self, member: Any, amount: int) -> int: ...
+
 
 @dataclass(frozen=True)
 class Reconciliation:
@@ -51,6 +53,26 @@ class InvariantViolation(BankingOperationError):
         super().__init__("The M Corp vault and ledger are not balanced.")
 
 
+class InstitutionNotInitialized(BankingOperationError):
+    """Covered banking is disabled until the vault is explicitly initialized."""
+
+
+class InitializationRefused(BankingOperationError):
+    """The vault state cannot be proved safe to initialize."""
+
+
+class AlreadyInitialized(InitializationRefused):
+    pass
+
+
+class InitialVaultBalanceRequiresConfirmation(InitializationRefused):
+    """An exact Red default balance requires an explicit owner confirmation."""
+
+
+class InitializationRecoveryRequired(RecoveryRequired):
+    """The vault reset could not be compensated after persisting failed."""
+
+
 class BankingService:
     """Serializes and compensates operations spanning Red Bank and SQLite.
 
@@ -70,6 +92,7 @@ class BankingService:
     ) -> int:
         self._require_positive_amount(amount)
         async with self._operation_lock:
+            self._require_initialized(institution_id)
             await self._require_invariant(institution_id, vault)
             await self._require_cash(player, amount)
             await self._move_cash(player, vault, amount)
@@ -97,6 +120,7 @@ class BankingService:
     ) -> int:
         self._require_positive_amount(amount)
         async with self._operation_lock:
+            self._require_initialized(institution_id)
             await self._require_invariant(institution_id, vault)
             ledger_balance = self.ledger.get_user_balance(institution_id, player.id)
             if ledger_balance < amount:
@@ -127,6 +151,7 @@ class BankingService:
     ) -> tuple[int, int]:
         self._require_positive_amount(amount)
         async with self._operation_lock:
+            self._require_initialized(institution_id)
             await self._require_invariant(institution_id, vault)
             return self.ledger.record_transfer(
                 institution_id,
@@ -227,6 +252,66 @@ class BankingService:
                 ledger_total=self.ledger.total_balance(institution_id),
             )
 
+    async def initialize_institution(
+        self,
+        institution_id: str,
+        vault: Any,
+        *,
+        default_vault_balance: int,
+        confirm_default_balance_reset: bool = False,
+    ) -> Reconciliation:
+        """Safely establish a zero-backed M Corp institution exactly once.
+
+        Red creates/accesses accounts with its configured default balance.  We
+        only clear that balance if the ledger is entirely virgin, it exactly
+        equals Red's current default, and the owner explicitly confirms it.
+        """
+        async with self._operation_lock:
+            if self.ledger.get_initialization(institution_id) is not None:
+                raise AlreadyInitialized()
+            ledger_total = self.ledger.total_balance(institution_id)
+            if ledger_total != 0:
+                raise InitializationRefused("Le ledger contient déjà des soldes.")
+            if self.ledger.transaction_count(institution_id) != 0:
+                raise InitializationRefused("Le ledger contient déjà des opérations.")
+
+            initial_vault_balance = await self.bank.get_balance(vault)
+            if initial_vault_balance != 0:
+                if initial_vault_balance != default_vault_balance:
+                    raise InitializationRefused(
+                        "Le coffre ne correspond pas au solde par défaut Red actuel."
+                    )
+                if not confirm_default_balance_reset:
+                    raise InitialVaultBalanceRequiresConfirmation()
+                try:
+                    result = await self.bank.set_balance(vault, 0)
+                    confirmed_balance = await self.bank.get_balance(vault)
+                except Exception as exc:
+                    raise InitializationRecoveryRequired(
+                        "Red Bank n'a pas confirmé la neutralisation du coffre."
+                    ) from exc
+                if result != 0 or confirmed_balance != 0:
+                    raise InitializationRefused("Red Bank n'a pas confirmé la remise à zéro du coffre.")
+
+            try:
+                self.ledger.mark_initialized(institution_id, vault.id, initial_vault_balance)
+            except Exception as persistence_error:
+                if initial_vault_balance:
+                    try:
+                        await self.bank.set_balance(vault, initial_vault_balance)
+                    except Exception as compensation_error:
+                        raise InitializationRecoveryRequired(
+                            "La neutralisation du coffre n'a pas pu être compensée."
+                        ) from compensation_error
+                raise BankingOperationError(
+                    "L'initialisation a été annulée avant sa confirmation durable."
+                ) from persistence_error
+
+            return Reconciliation(
+                vault_balance=await self.bank.get_balance(vault),
+                ledger_total=self.ledger.total_balance(institution_id),
+            )
+
     @staticmethod
     def _require_positive_amount(amount: int) -> None:
         if not isinstance(amount, int) or amount <= 0:
@@ -243,6 +328,10 @@ class BankingService:
         )
         if not report.is_balanced:
             raise InvariantViolation(report)
+
+    def _require_initialized(self, institution_id: str) -> None:
+        if self.ledger.get_initialization(institution_id) is None:
+            raise InstitutionNotInitialized()
 
     async def _move_cash(self, source: Any, destination: Any, amount: int) -> None:
         """Move Red credits and reverse the debit if destination crediting fails."""

@@ -11,7 +11,11 @@ from .ledger import InsufficientLedgerFunds, InvalidAmount, LedgerStore, SameAcc
 from .service import (
     BankingOperationError,
     BankingService,
+    AlreadyInitialized,
+    InitialVaultBalanceRequiresConfirmation,
+    InitializationRefused,
     InvariantViolation,
+    InstitutionNotInitialized,
     InsufficientCash,
     RecoveryRequired,
 )
@@ -28,6 +32,9 @@ class RedBankGateway:
 
     async def deposit(self, member: Any, amount: int) -> int:
         return await bank.deposit_credits(member, amount)
+
+    async def set_balance(self, member: Any, amount: int) -> int:
+        return await bank.set_balance(member, amount)
 
 
 class MCorp(commands.Cog):
@@ -203,6 +210,41 @@ class MCorp(commands.Cog):
     @commands.command()
     @commands.guild_only()
     @commands.is_owner()
+    async def bankinit(self, ctx: commands.Context, confirmer: str | None = None) -> None:
+        """[Propriétaire] Initialise une fois le coffre M Corp.
+
+        With Red's non-zero default balance, rerun this command as
+        ``m!bankinit neutraliser`` only after reviewing the displayed warning.
+        """
+        institution_id, vault = await self._bank_context(ctx)
+        try:
+            report = await self.banking.initialize_institution(
+                institution_id,
+                vault,
+                default_vault_balance=await self._red_default_balance(vault),
+                confirm_default_balance_reset=confirmer == "neutraliser",
+            )
+        except InitialVaultBalanceRequiresConfirmation:
+            await ctx.send(
+                "Le ledger est vierge mais le coffre contient exactement le solde par défaut Red. "
+                "Après avoir vérifié qu'il ne s'agit pas de fonds légitimes, confirmez explicitement avec "
+                "`m!bankinit neutraliser`."
+            )
+            return
+        except Exception as exc:
+            await self._send_operation_error(ctx, exc)
+            return
+        currency = await bank.get_currency_name(ctx.guild)
+        await ctx.send(
+            "Coffre M Corp initialisé et verrouillé contre toute réinitialisation.\n"
+            f"Coffre Red : {report.vault_balance} {currency}\n"
+            f"Ledger total : {report.ledger_total} crédits\n"
+            f"État : **{'OK' if report.is_balanced else 'ANOMALIE'}**"
+        )
+
+    @commands.command()
+    @commands.guild_only()
+    @commands.is_owner()
     async def bankcheck(self, ctx: commands.Context) -> None:
         """[Propriétaire] Vérifie que le coffre Red couvre le ledger M Corp."""
         institution_id, vault = await self._bank_context(ctx)
@@ -234,6 +276,13 @@ class MCorp(commands.Cog):
         return institution_id, vault
 
     @staticmethod
+    async def _red_default_balance(vault: Any) -> int:
+        """Read Red's public configured default for this vault's bank scope."""
+        if await bank.is_global():
+            return await bank.get_default_balance()
+        return await bank.get_default_balance(vault.guild)
+
+    @staticmethod
     async def _send_operation_error(ctx: commands.Context, exc: Exception) -> None:
         if isinstance(exc, InvalidAmount):
             await ctx.send("Le montant doit être strictement supérieur à 0.")
@@ -252,6 +301,18 @@ class MCorp(commands.Cog):
             await ctx.send(
                 "Opération refusée : le coffre M Corp et le ledger sont déséquilibrés "
                 f"({exc.report.difference:+d} crédits). Un propriétaire doit exécuter `m!bankcheck`."
+            )
+        elif isinstance(exc, InstitutionNotInitialized):
+            await ctx.send(
+                "Opération bancaire couverte refusée : M Corp n'est pas initialisée. "
+                "Un propriétaire doit d'abord exécuter `m!bankinit`."
+            )
+        elif isinstance(exc, AlreadyInitialized):
+            await ctx.send("Initialisation refusée : cette institution M Corp est déjà initialisée.")
+        elif isinstance(exc, InitializationRefused):
+            await ctx.send(
+                "Initialisation refusée : le coffre ou le ledger ne permet pas de prouver "
+                "qu'une remise à zéro est sûre. Exécutez `m!bankcheck` et corrigez manuellement."
             )
         elif isinstance(exc, BankingOperationError):
             await ctx.send("Opération annulée : aucun changement comptable n'a été confirmé.")

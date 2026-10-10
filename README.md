@@ -33,6 +33,8 @@ propriétaires `COMPANY`, `BANK`, `NPC` et `SYSTEM` sans les activer.
 - `m!transactions` : dix dernières opérations pertinentes.
 - `m!crediter`, `m!debiter` : opérations Red Bank réservées au propriétaire,
   explicitement hors ledger.
+- `m!bankinit [neutraliser]` : initialisation unique du coffre, réservée au
+  propriétaire.
 - `m!bankcheck` : réconciliation propriétaire : coffre Red, total du ledger,
   différence et état.
 
@@ -41,10 +43,40 @@ soldes, tentent une compensation en cas d'échec partiel, puis signalent une
 réconciliation manuelle lorsque celle-ci échoue. Ce mécanisme ne prétend pas
 remplacer une transaction distribuée entre Red Bank et SQLite.
 
-Avant la première opération, le coffre Red du bot doit être vide et le ledger
-doit totaliser zéro. Si ce n'est pas le cas, `m!bankcheck` signalera l'écart et
-les opérations couvertes seront refusées jusqu'à résolution explicite : le cog
-ne crée jamais une écriture de correction automatiquement.
+## Initialisation d’une nouvelle institution M Corp
+
+Les comptes Red Bank ne commencent pas nécessairement à zéro. Red configure un
+`default_balance` (100 par défaut) et la lecture du compte du bot via l'API peut
+créer/obtenir ce compte avec ce solde. Le coffre M Corp ne doit donc jamais être
+présumé vide.
+
+Avant tout dépôt, retrait ou virement, le propriétaire doit :
+
+1. Exécuter `m!bankcheck` pour lire les valeurs Red réelles.
+2. Exécuter `m!bankinit`.
+3. Si le coffre contient exactement le `default_balance` Red et que le ledger
+   est totalement vierge, vérifier qu'il s'agit bien du crédit technique Red,
+   puis confirmer explicitement avec `m!bankinit neutraliser`.
+4. Exécuter à nouveau `m!bankcheck` ; il doit afficher `Coffre Red : 0`,
+   `Ledger total : 0` et `État : OK` avant la première opération.
+
+`m!bankinit` est owner-only et inscrit durablement l'initialisation. Il refuse
+une deuxième tentative, un ledger avec soldes ou la moindre transaction, ainsi
+que tout solde de coffre qui ne correspond pas exactement au solde par défaut
+Red. En cas de refus, ne modifiez ni le fichier SQLite ni les données internes
+de Red, et ne relancez pas le cog dans l'espoir de remettre le coffre à zéro :
+ces actions pourraient détruire des fonds légitimes. Corrigez l'ambiguïté
+manuellement, puis vérifiez avec `m!bankcheck`.
+
+Les opérations couvertes (`m!depot`, `m!retrait`, `m!virement`) sont refusées
+tant que cette procédure n'est pas terminée. `m!bankcheck` reste toujours
+disponible pour le diagnostic et affiche les montants réels, sans masquer un
+solde initial.
+
+La migration SQLite est additive : au chargement, le cog crée seulement la
+table `institution_initializations` si elle n'existe pas. Les bases Banking MVP
+V1 existantes ne sont ni réécrites ni marquées comme initialisées
+automatiquement ; elles doivent suivre la procédure ci-dessus.
 
 ## Tests
 
