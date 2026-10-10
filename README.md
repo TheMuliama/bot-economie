@@ -175,6 +175,7 @@ checkout joueur ni le transfert de marchandise de Phase 4.
 - `m!shopcreate SHOP_ID @propriétaire Nom de la boutique`
 - `m!shopinfo SHOP_ID`
 - `m!shoplicense SHOP_ID`
+- `m!shopfund SHOP_ID montant` (allocation couverte depuis la trésorerie)
 - `m!shopsetprice item prix [raison]`
 - `m!shopallowitem SHOP_ID item`
 - `m!shopdenyitem SHOP_ID item`

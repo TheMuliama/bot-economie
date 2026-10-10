@@ -133,6 +133,19 @@ class EconomyControlTests(unittest.TestCase):
         self.assertEqual(self.ledger.get_treasury_balance(INSTITUTION), 200)
         self.assertEqual(self.ledger.total_cash_backed_balance(INSTITUTION), total_before)
 
+    def test_shop_funding_uses_existing_treasury_and_preserves_total(self) -> None:
+        self.create_shop()
+        self.ledger.record_deposit(INSTITUTION, 1, 500)
+        self.ledger.record_player_to_treasury(INSTITUTION, 1, 500)
+        total_before = self.ledger.total_cash_backed_balance(INSTITUTION)
+
+        treasury, shop = self.control.fund_shop(
+            INSTITUTION, SHOP_ID, 200, administrator_id=99
+        )
+
+        self.assertEqual((treasury, shop), (300, 200))
+        self.assertEqual(self.ledger.total_cash_backed_balance(INSTITUTION), total_before)
+
     def test_license_expiration_transition(self) -> None:
         self.create_shop()
         self.control.pay_license(

@@ -182,6 +182,22 @@ class EconomyControlService:
             raise InvalidControlValue("quantity")
         self.shops.set_license_stock_rule(institution_id, shop_id, item_id.casefold(), quantity)
 
+    def fund_shop(
+        self, institution_id: str, shop_id: str, amount: int, *, administrator_id: int
+    ) -> tuple[int, int]:
+        self._shop(institution_id, shop_id)
+        if amount <= 0:
+            raise InvalidControlValue("amount")
+        balances = self.ledger.record_treasury_to_shop(
+            institution_id, shop_id, amount,
+            {"operation": "SHOP_FUNDED", "administrator_id": administrator_id},
+        )
+        self.shops.record_event(
+            institution_id, "SHOP_FUNDED", shop_id=shop_id,
+            actor_id=str(administrator_id), metadata={"amount": amount},
+        )
+        return balances
+
     def pay_license(
         self, institution_id: str, shop_id: str, *, administrator_id: int,
         paid_at: datetime | None = None,

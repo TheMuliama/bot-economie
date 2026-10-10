@@ -599,6 +599,24 @@ class MCorp(commands.Cog):
     @commands.command()
     @commands.guild_only()
     @commands.is_owner()
+    async def shopfund(self, ctx: commands.Context, shop_id: str, montant: int) -> None:
+        """[Propriétaire] Alloue des crédits couverts de la trésorerie à une boutique."""
+        institution_id, _ = await self._bank_context(ctx)
+        try:
+            treasury, shop_balance = self.control.fund_shop(
+                institution_id, shop_id.upper(), montant, administrator_id=ctx.author.id
+            )
+        except Exception as exc:
+            await self._send_control_error(ctx, exc)
+            return
+        await ctx.send(
+            f"`{shop_id.upper()}` financée de {montant} crédits. "
+            f"Compte boutique : {shop_balance}; trésorerie : {treasury}."
+        )
+
+    @commands.command()
+    @commands.guild_only()
+    @commands.is_owner()
     async def shopsetprice(
         self, ctx: commands.Context, item_id: str, prix: int, *, raison: str | None = None
     ) -> None:
