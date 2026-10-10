@@ -151,6 +151,26 @@ class EconomyControlService:
         commission = gross_amount * commission_bps // 10_000
         return SaleSplit(gross_amount, gross_amount - commission, commission)
 
+    def apply_sale_split(
+        self, institution_id: str, shop_id: str, buyer_user_id: int, gross_amount: int,
+        *, reference: str | None = None,
+    ) -> tuple[SaleSplit, tuple[int, int, int]]:
+        """Apply only the covered-money leg of a future sale.
+
+        Phase 4 will orchestrate this primitive with an inventory transfer; no
+        player purchase command calls it in Phase 3.5.
+        """
+        shop = self.refresh_license_status(institution_id, shop_id)
+        if shop.status != SHOP_ACTIVE:
+            raise ShopUnavailable(shop.status)
+        split = self.calculate_sale_split(gross_amount, shop.commission_bps)
+        balances = self.ledger.record_sale_split(
+            institution_id, buyer_user_id, shop_id, split.gross_amount,
+            split.shop_amount, split.commission_amount,
+            {"reference": reference} if reference is not None else {},
+        )
+        return split, balances
+
     def set_license_stock_rule(
         self, institution_id: str, shop_id: str, item_id: str, quantity: int
     ) -> None:

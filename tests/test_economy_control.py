@@ -181,6 +181,20 @@ class EconomyControlTests(unittest.TestCase):
         split = self.control.calculate_sale_split(1_000, 1_000)
         self.assertEqual((split.shop_amount, split.commission_amount), (900, 100))
 
+    def test_sale_split_is_atomic_and_preserves_covered_total(self) -> None:
+        self.create_shop(commission_bps=1_000)
+        self.control.pay_license(INSTITUTION, SHOP_ID, administrator_id=99)
+        self.ledger.record_deposit(INSTITUTION, 42, 1_000)
+        total_before = self.ledger.total_cash_backed_balance(INSTITUTION)
+
+        split, balances = self.control.apply_sale_split(
+            INSTITUTION, SHOP_ID, 42, 1_000, reference="future-order"
+        )
+
+        self.assertEqual((split.shop_amount, split.commission_amount), (900, 100))
+        self.assertEqual(balances, (0, 900, 100))
+        self.assertEqual(self.ledger.total_cash_backed_balance(INSTITUTION), total_before)
+
     def test_restock_fee_and_total_cost(self) -> None:
         self.create_shop(restock_fee_bps=500)
         self.control.pay_license(INSTITUTION, SHOP_ID, administrator_id=99)

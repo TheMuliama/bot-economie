@@ -443,6 +443,67 @@ class LedgerStore:
             )
             return treasury.balance - amount, destination.balance + amount
 
+    def record_sale_split(
+        self,
+        institution_id: str,
+        buyer_user_id: int,
+        shop_id: str,
+        gross_amount: int,
+        shop_amount: int,
+        commission_amount: int,
+        metadata: dict[str, Any] | None = None,
+    ) -> tuple[int, int, int]:
+        """Atomically split a covered payment between a shop and treasury."""
+        self._require_positive_amount(gross_amount)
+        if min(shop_amount, commission_amount) < 0 or shop_amount + commission_amount != gross_amount:
+            raise InvalidAmount()
+        with self._connection() as connection:
+            buyer = self._get_or_create_user_account(connection, institution_id, buyer_user_id)
+            if buyer.balance < gross_amount:
+                raise InsufficientLedgerFunds(buyer.balance, gross_amount)
+            shop = self._get_or_create_account(
+                connection, institution_id, SHOP_OWNER_TYPE, shop_id, CHECKING_ACCOUNT_TYPE
+            )
+            treasury = self._get_or_create_treasury_account(connection, institution_id)
+            connection.execute(
+                "UPDATE accounts SET balance = balance - ? WHERE account_id = ?",
+                (gross_amount, buyer.account_id),
+            )
+            if shop_amount:
+                connection.execute(
+                    "UPDATE accounts SET balance = balance + ? WHERE account_id = ?",
+                    (shop_amount, shop.account_id),
+                )
+            if commission_amount:
+                connection.execute(
+                    "UPDATE accounts SET balance = balance + ? WHERE account_id = ?",
+                    (commission_amount, treasury.account_id),
+                )
+            transaction_metadata = dict(metadata or {})
+            transaction_metadata.update(
+                {
+                    "shop_id": shop_id,
+                    "shop_amount": shop_amount,
+                    "commission_amount": commission_amount,
+                    "treasury_account_id": treasury.account_id,
+                }
+            )
+            self._insert_transaction(
+                connection,
+                institution_id=institution_id,
+                transaction_type="SHOP_SALE_SPLIT",
+                amount=gross_amount,
+                source_account_id=buyer.account_id,
+                destination_account_id=shop.account_id,
+                participants=(buyer_user_id, f"SHOP:{shop_id}", TREASURY_OWNER_ID),
+                metadata=transaction_metadata,
+            )
+            return (
+                buyer.balance - gross_amount,
+                shop.balance + shop_amount,
+                treasury.balance + commission_amount,
+            )
+
     def record_cash_event(
         self,
         institution_id: str,
