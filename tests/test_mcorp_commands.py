@@ -34,6 +34,7 @@ class Banking:
     def __init__(self) -> None:
         self.cash_calls: list[tuple[object, object, object, int]] = []
         self.treasury_calls: list[tuple[object, object, object, int]] = []
+        self.transfer_calls: list[tuple[object, object, object, object, int]] = []
 
     async def cash_transfer(self, *args):  # type: ignore[no-untyped-def]
         self.cash_calls.append(args)
@@ -41,6 +42,10 @@ class Banking:
     async def pay_treasury(self, *args):  # type: ignore[no-untyped-def]
         self.treasury_calls.append(args)
         return (200, 100)
+
+    async def bank_transfer(self, *args):  # type: ignore[no-untyped-def]
+        self.transfer_calls.append(args)
+        return (200, 400)
 
 
 class MCorpCommandTests(unittest.IsolatedAsyncioTestCase):
@@ -78,6 +83,18 @@ class MCorpCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.cog.banking.treasury_calls), 1)
         self.assertIn("Paiement de 100 crédits à M Corp", self.ctx.sent[0])
 
+    async def test_payer_member_uses_banking_transfer(self) -> None:
+        class Converter:
+            async def convert(self, ctx, argument):  # type: ignore[no-untyped-def]
+                return self_bob
+
+        self_bob = self.bob
+        with patch("mcorp.mcorp.commands.MemberConverter", Converter):
+            await MCorp.payer.callback(self.cog, self.ctx, "@Bob", 100)
+
+        self.assertEqual(len(self.cog.banking.transfer_calls), 1)
+        self.assertIn("Paiement bancaire de 100 crédits", self.ctx.sent[0])
+
     async def test_donner_cash_uses_red_bank_transfer_and_not_inventory(self) -> None:
         async def get_currency_name(guild):  # type: ignore[no-untyped-def]
             return "R"
@@ -94,3 +111,17 @@ class MCorpCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(MCorp._parse_cash_amount("100"))
         self.assertIsNone(MCorp._parse_cash_amount("immunity"))
 
+    async def test_solde_compatibility_command_redirects_to_argent(self) -> None:
+        async def get_balance(member):  # type: ignore[no-untyped-def]
+            return 800
+
+        async def get_currency_name(guild):  # type: ignore[no-untyped-def]
+            return "R"
+
+        with patch("mcorp.mcorp.bank.get_balance", get_balance), patch(
+            "mcorp.mcorp.bank.get_currency_name", get_currency_name
+        ):
+            await MCorp.solde.callback(self.cog, self.ctx)
+
+        self.assertIn("remplacée par `m!argent`", self.ctx.sent[0])
+        self.assertIn("Sur vous : 800 R", self.ctx.sent[1])
