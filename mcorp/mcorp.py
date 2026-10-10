@@ -56,25 +56,35 @@ class MCorp(commands.Cog):
         await ctx.send("M Corp est opérationnelle.")
 
     @commands.command()
+    @commands.guild_only()
+    async def argent(self, ctx: commands.Context) -> None:
+        """Affiche votre liquide Red et votre compte bancaire M Corp."""
+        await self._send_money_summary(ctx)
+
+    @commands.command()
+    @commands.guild_only()
     async def solde(self, ctx: commands.Context) -> None:
-        """Affiche le portefeuille Red Bank de l'utilisateur."""
-        balance = await bank.get_balance(ctx.author)
-        currency = await bank.get_currency_name(ctx.guild)
-        await ctx.send(f"{ctx.author.mention}, votre portefeuille Red contient {balance} {currency}.")
+        """Compatibilité : utilisez plutôt m!argent."""
+        await ctx.send("`m!solde` est remplacée par `m!argent`.")
+        await self._send_money_summary(ctx)
 
     @commands.command()
     @commands.guild_only()
     async def compte(self, ctx: commands.Context) -> None:
-        """Affiche le portefeuille Red et le compte bancaire M Corp."""
+        """Compatibilité : utilisez plutôt m!argent."""
+        await ctx.send("`m!compte` est remplacée par `m!argent`.")
+        await self._send_money_summary(ctx)
+
+    async def _send_money_summary(self, ctx: commands.Context) -> None:
+        """Render the user-facing view without exposing storage implementation."""
         institution_id, vault = await self._bank_context(ctx)
         wallet = await bank.get_balance(ctx.author)
         account = self.ledger.get_user_balance(institution_id, ctx.author.id)
         currency = await bank.get_currency_name(ctx.guild)
         await ctx.send(
-            f"**Compte M Corp — {ctx.author.display_name}**\n"
-            f"Portefeuille Red : {wallet} {currency}\n"
-            f"Compte bancaire : {account} crédits\n"
-            f"Coffre M Corp : {vault.display_name}"
+            f"**💰 Argent de {ctx.author.display_name}**\n"
+            f"Sur vous : {wallet} {currency}\n"
+            f"Compte bancaire : {account} crédits"
         )
 
     @commands.command()
@@ -111,24 +121,48 @@ class MCorp(commands.Cog):
 
     @commands.command()
     @commands.guild_only()
-    async def payer(self, ctx: commands.Context, membre: commands.MemberConverter, montant: int) -> None:
-        """Envoie des R-crédits directement à un membre via Red Bank."""
+    async def payer(self, ctx: commands.Context, beneficiaire: str, montant: int) -> None:
+        """Effectue un paiement bancaire vers un membre ou M Corp."""
         institution_id, vault = await self._bank_context(ctx)
+        if beneficiaire.casefold() == "mcorp":
+            try:
+                player_balance, treasury_balance = await self.banking.pay_treasury(
+                    institution_id, ctx.author, vault, montant
+                )
+            except Exception as exc:
+                await self._send_operation_error(ctx, exc)
+                return
+            await ctx.send(
+                f"Paiement de {montant} crédits à M Corp effectué.\n"
+                f"Votre compte bancaire : {player_balance} crédits\n"
+                f"Trésorerie M Corp : {treasury_balance} crédits"
+            )
+            return
+        try:
+            membre = await commands.MemberConverter().convert(ctx, beneficiaire)
+        except commands.CommandError:
+            await ctx.send("Indiquez un membre valide ou le mot-clé `mcorp`.")
+            return
         if membre.id == vault.id:
             await ctx.send("Utilisez `m!depot` pour alimenter le coffre M Corp.")
             return
         try:
-            await self.banking.cash_transfer(institution_id, ctx.author, membre, montant)
+            source_balance, _ = await self.banking.bank_transfer(
+                institution_id, ctx.author, membre, vault, montant
+            )
         except Exception as exc:
             await self._send_operation_error(ctx, exc)
             return
-        currency = await bank.get_currency_name(ctx.guild)
-        await ctx.send(f"{montant} {currency} envoyés à {membre.mention}.")
+        await ctx.send(
+            f"Paiement bancaire de {montant} crédits envoyé à {membre.mention}. "
+            f"Votre compte bancaire contient maintenant {source_balance} crédits."
+        )
 
     @commands.command()
     @commands.guild_only()
     async def virement(self, ctx: commands.Context, membre: commands.MemberConverter, montant: int) -> None:
-        """Transfère des crédits entre deux comptes bancaires M Corp."""
+        """Compatibilité : utilisez plutôt m!payer @membre montant."""
+        await ctx.send("`m!virement` est remplacée par `m!payer @membre montant`.")
         institution_id, vault = await self._bank_context(ctx)
         try:
             source_balance, _ = await self.banking.bank_transfer(
@@ -145,7 +179,8 @@ class MCorp(commands.Cog):
     @commands.command()
     @commands.guild_only()
     async def payermcorp(self, ctx: commands.Context, montant: int) -> None:
-        """Transfère des crédits de votre compte bancaire vers M Corp."""
+        """Compatibilité : utilisez plutôt m!payer mcorp montant."""
+        await ctx.send("`m!payermcorp` est remplacée par `m!payer mcorp montant`.")
         institution_id, vault = await self._bank_context(ctx)
         try:
             player_balance, treasury_balance = await self.banking.pay_treasury(
