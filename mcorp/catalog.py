@@ -23,6 +23,9 @@ ITEM_CATALOG: dict[str, ItemDefinition] = {
     "ticket_silence": ItemDefinition(
         "ticket_silence", "Ticket silence", "Ticket sans effet gameplay pour le moment.", True, True, True
     ),
+    "ticket_vote": ItemDefinition(
+        "ticket_vote", "Ticket de vote", "Ticket sans effet gameplay pour le moment.", True, True, True
+    ),
     "immunity": ItemDefinition(
         "immunity", "Immunité", "Immunité sans effet gameplay pour le moment.", True, True, True
     ),

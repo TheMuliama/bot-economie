@@ -110,6 +110,27 @@ class InventoryStore:
             ).fetchone()
         return 0 if row is None else int(row["quantity"])
 
+    def totals_by_item_and_owner_type(self) -> dict[str, dict[str, int]]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                """SELECT item_id, owner_type, SUM(quantity) AS total
+                   FROM inventory_items WHERE quantity > 0
+                   GROUP BY item_id, owner_type"""
+            ).fetchall()
+        totals: dict[str, dict[str, int]] = {}
+        for row in rows:
+            totals.setdefault(str(row["item_id"]), {})[str(row["owner_type"])] = int(row["total"])
+        return totals
+
+    def production_totals(self) -> dict[str, int]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                """SELECT item_id, SUM(quantity) AS total FROM inventory_transactions
+                   WHERE transaction_type = 'ITEM_PRODUCTION' AND status = 'COMPLETED'
+                   GROUP BY item_id"""
+            ).fetchall()
+        return {str(row["item_id"]): int(row["total"]) for row in rows}
+
     def add_item(
         self, owner: InventoryOwner, item_id: str, quantity: int, *, transaction_type: str,
         metadata: dict[str, Any] | None = None, max_quantity: int | None = None,

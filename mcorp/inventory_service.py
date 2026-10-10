@@ -48,7 +48,7 @@ class InventoryService:
 
     def transfer_item(
         self, source: InventoryOwner, destination: InventoryOwner, item_id: str, quantity: int,
-        *, initiator_id: int | None = None,
+        *, initiator_id: int | None = None, transaction_type: str = "ITEM_TRANSFER",
     ) -> tuple[int, int]:
         item = self._item(item_id)
         self._require_quantity_for_item(item, quantity)
@@ -56,8 +56,20 @@ class InventoryService:
             raise ItemNotTransferable(item.item_id)
         return self.store.transfer_item(
             source, destination, item.item_id, quantity,
+            transaction_type=transaction_type,
             metadata={} if initiator_id is None else {"initiator_id": initiator_id},
             destination_max_quantity=None if item.stackable else 1,
+        )
+
+    def produce_item(
+        self, producer: InventoryOwner, item_id: str, quantity: int, *, administrator_id: int
+    ) -> int:
+        item = self._item(item_id)
+        self._require_quantity_for_item(item, quantity)
+        return self.store.add_item(
+            producer, item.item_id, quantity, transaction_type="ITEM_PRODUCTION",
+            metadata={"administrator_id": administrator_id},
+            max_quantity=None if item.stackable else 1,
         )
 
     @staticmethod
