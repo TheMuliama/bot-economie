@@ -133,4 +133,3 @@ class InventoryServiceTests(unittest.TestCase):
         self.assertEqual(transaction.transaction_type, "ITEM_TRANSFER")
         self.assertEqual(transaction.item_id, "immunity")
         self.assertEqual(transaction.destination_owner, self.bob)
-
