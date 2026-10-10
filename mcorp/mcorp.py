@@ -2,12 +2,29 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from redbot.core import bank, commands
 from redbot.core.data_manager import cog_data_path
 
 from .ledger import InsufficientLedgerFunds, InvalidAmount, LedgerStore, SameAccountTransfer
+from .catalog import get_item
+from .inventory import (
+    InsufficientInventory,
+    InvalidItemQuantity,
+    InventoryCapacityExceeded,
+    InventoryOwner,
+    InventoryStore,
+    SameInventoryOwner,
+    USER_OWNER_TYPE,
+)
+from .inventory_service import (
+    InventoryService,
+    ItemNotTransferable,
+    NonStackableQuantity,
+    UnknownItem,
+)
 from .service import (
     BankingOperationError,
     BankingService,
@@ -44,11 +61,14 @@ class MCorp(commands.Cog):
         self.bot = bot
         self.ledger = LedgerStore(cog_data_path(self) / "ledger.sqlite3")
         self.banking = BankingService(self.ledger, RedBankGateway())
+        self.inventory_store = InventoryStore(self.ledger.database_path)
+        self.inventory = InventoryService(self.inventory_store)
 
     async def cog_load(self) -> None:
         # The schema creation is small and happens once at cog load. Keeping it
         # synchronous also avoids executor lifecycle issues during Red startup.
         self.ledger.initialize()
+        self.inventory_store.initialize()
 
     @commands.command()
     async def mcorp(self, ctx: commands.Context) -> None:
@@ -118,6 +138,57 @@ class MCorp(commands.Cog):
             f"Retrait de {montant} {currency} effectué. "
             f"Votre compte bancaire contient maintenant {new_balance} crédits."
         )
+
+    @commands.command()
+    @commands.guild_only()
+    async def donner(
+        self,
+        ctx: commands.Context,
+        membre: commands.MemberConverter,
+        cible: str,
+        quantite: int | None = None,
+    ) -> None:
+        """Donne du liquide (`100R`) ou un objet (`immunity [quantité]`)."""
+        institution_id, _ = await self._bank_context(ctx)
+        cash_amount = self._parse_cash_amount(cible)
+        if cash_amount is not None:
+            if quantite is not None:
+                await ctx.send("Syntaxe liquide : `m!donner @membre 100R`.")
+                return
+            try:
+                await self.banking.cash_transfer(institution_id, ctx.author, membre, cash_amount)
+            except Exception as exc:
+                await self._send_operation_error(ctx, exc)
+                return
+            currency = await bank.get_currency_name(ctx.guild)
+            await ctx.send(f"Vous avez donné {cash_amount} {currency} à {membre.mention}.")
+            return
+
+        quantity = 1 if quantite is None else quantite
+        try:
+            source_quantity, destination_quantity = self.inventory.transfer_item(
+                self._user_owner(ctx.author.id),
+                self._user_owner(membre.id),
+                cible,
+                quantity,
+                initiator_id=ctx.author.id,
+            )
+        except Exception as exc:
+            await self._send_inventory_error(ctx, exc)
+            return
+        item = get_item(cible)
+        assert item is not None
+        await ctx.send(
+            f"Vous avez donné {item.display_name} ×{quantity} à {membre.mention}.\n"
+            f"Votre inventaire : {item.display_name} ×{source_quantity}\n"
+            f"Inventaire de {membre.display_name} : {item.display_name} ×{destination_quantity}"
+        )
+
+    @commands.command()
+    @commands.guild_only()
+    async def inventaire(self, ctx: commands.Context) -> None:
+        """Affiche votre liquide Red et vos objets M Corp."""
+        await self._send_inventory(ctx, ctx.author)
 
     @commands.command()
     @commands.guild_only()
@@ -385,6 +456,49 @@ class MCorp(commands.Cog):
             f"Invariant : **{state}**"
         )
 
+    @commands.command()
+    @commands.guild_only()
+    @commands.is_owner()
+    async def itemgrant(
+        self, ctx: commands.Context, membre: commands.MemberConverter, item_id: str, quantite: int = 1
+    ) -> None:
+        """[Propriétaire] Attribue un objet catalogué à un membre."""
+        try:
+            balance = self.inventory.add_item(
+                self._user_owner(membre.id), item_id, quantite, administrator_id=ctx.author.id
+            )
+        except Exception as exc:
+            await self._send_inventory_error(ctx, exc)
+            return
+        item = get_item(item_id)
+        assert item is not None
+        await ctx.send(f"{item.display_name} ×{quantite} attribué à {membre.mention}. Total : ×{balance}.")
+
+    @commands.command()
+    @commands.guild_only()
+    @commands.is_owner()
+    async def itemremove(
+        self, ctx: commands.Context, membre: commands.MemberConverter, item_id: str, quantite: int = 1
+    ) -> None:
+        """[Propriétaire] Retire un objet catalogué à un membre."""
+        try:
+            balance = self.inventory.remove_item(
+                self._user_owner(membre.id), item_id, quantite, administrator_id=ctx.author.id
+            )
+        except Exception as exc:
+            await self._send_inventory_error(ctx, exc)
+            return
+        item = get_item(item_id)
+        assert item is not None
+        await ctx.send(f"{item.display_name} ×{quantite} retiré à {membre.mention}. Total : ×{balance}.")
+
+    @commands.command()
+    @commands.guild_only()
+    @commands.is_owner()
+    async def iteminspect(self, ctx: commands.Context, membre: commands.MemberConverter) -> None:
+        """[Propriétaire] Consulte l'inventaire d'un membre."""
+        await self._send_inventory(ctx, membre)
+
     async def _bank_context(self, ctx: commands.Context) -> tuple[str, Any]:
         """Return the Red vault member and ledger institution for this context."""
         if ctx.guild is None or self.bot.user is None:
@@ -400,6 +514,37 @@ class MCorp(commands.Cog):
             institution_name = f"M Corp — {ctx.guild.name}"
         self.ledger.ensure_institution(institution_id, institution_name, vault.id)
         return institution_id, vault
+
+    async def _send_inventory(self, ctx: commands.Context, member: Any) -> None:
+        """Combine the Red cash display with the distinct inventory source."""
+        wallet = await bank.get_balance(member)
+        currency = await bank.get_currency_name(ctx.guild)
+        entries = self.inventory.get_inventory(self._user_owner(member.id))
+        if entries:
+            lines = []
+            for entry in entries:
+                item = get_item(entry.item_id)
+                display_name = entry.item_id if item is None else item.display_name
+                lines.append(f"- {display_name} ×{entry.quantity}")
+            objects = "\n".join(lines)
+        else:
+            objects = "Aucun objet."
+        await ctx.send(
+            f"**🎒 Inventaire de {member.display_name}**\n\n"
+            f"💵 Liquide : {wallet} {currency}\n"
+            "*(Le liquide reste stocké dans Red Bank.)*\n\n"
+            f"**Objets :**\n{objects}"
+        )
+
+    @staticmethod
+    def _parse_cash_amount(token: str) -> int | None:
+        """Parse the unambiguous `100R` direct-cash syntax, or return None."""
+        match = re.fullmatch(r"([0-9]+)[rR]", token)
+        return None if match is None else int(match.group(1))
+
+    @staticmethod
+    def _user_owner(user_id: int) -> InventoryOwner:
+        return InventoryOwner(USER_OWNER_TYPE, str(user_id))
 
     @staticmethod
     async def _red_default_balance(vault: Any) -> int:
@@ -442,5 +587,24 @@ class MCorp(commands.Cog):
             )
         elif isinstance(exc, BankingOperationError):
             await ctx.send("Opération annulée : aucun changement comptable n'a été confirmé.")
+        else:
+            raise exc
+
+    @staticmethod
+    async def _send_inventory_error(ctx: commands.Context, exc: Exception) -> None:
+        if isinstance(exc, UnknownItem):
+            await ctx.send("Objet inconnu : utilisez un identifiant du catalogue M Corp.")
+        elif isinstance(exc, ItemNotTransferable):
+            await ctx.send("Cet objet ne peut pas être transféré.")
+        elif isinstance(exc, InvalidItemQuantity):
+            await ctx.send("La quantité d'objet doit être strictement supérieure à 0.")
+        elif isinstance(exc, NonStackableQuantity):
+            await ctx.send("Cet objet ne peut être manipulé qu'à l'unité.")
+        elif isinstance(exc, InventoryCapacityExceeded):
+            await ctx.send("Cet objet non empilable est déjà présent dans cet inventaire.")
+        elif isinstance(exc, InsufficientInventory):
+            await ctx.send(f"Vous ne possédez que {exc.available} exemplaire(s) de cet objet.")
+        elif isinstance(exc, SameInventoryOwner):
+            await ctx.send("Vous ne pouvez pas transférer un objet vers le même inventaire.")
         else:
             raise exc
