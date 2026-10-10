@@ -147,6 +147,18 @@ class BankingServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.bank.balances[self.vault.id], total_before)
         self.assertTrue((await self.service.reconcile(INSTITUTION_ID, self.vault)).is_balanced)
 
+    async def test_shop_account_transfers_preserve_vault_invariant(self) -> None:
+        await self.service.deposit(INSTITUTION_ID, self.alice, self.vault, 500)
+        self.ledger.record_player_to_treasury(INSTITUTION_ID, self.alice.id, 500)
+        self.ledger.record_treasury_to_shop(INSTITUTION_ID, "TEST_STORE", 300)
+        self.ledger.record_shop_to_treasury(INSTITUTION_ID, "TEST_STORE", 100)
+
+        report = await self.service.reconcile(INSTITUTION_ID, self.vault)
+
+        self.assertTrue(report.is_balanced)
+        self.assertEqual(report.vault_balance, 500)
+        self.assertEqual(report.ledger_total, 500)
+
     async def test_initialized_institution_has_a_zero_covered_treasury(self) -> None:
         treasury = self.ledger.get_or_create_treasury_account(INSTITUTION_ID)
 
