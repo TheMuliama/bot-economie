@@ -10,6 +10,23 @@ from redbot.core.data_manager import cog_data_path
 
 from .ledger import InsufficientLedgerFunds, InvalidAmount, LedgerStore, SameAccountTransfer
 from .catalog import get_item
+from .control import (
+    AutoRestockDisabled,
+    AutoRestockNotAllowed,
+    ControlOperationFailed,
+    ControlRecoveryRequired,
+    EconomyControlService,
+    InvalidControlValue,
+    RestockBudgetExceeded,
+    RestockThresholdNotReached,
+    ShopFundsInsufficient,
+    ShopItemDenied,
+    ShopUnavailable,
+    UnitPriceLimitExceeded,
+    WarehouseStockInsufficient,
+    WholesaleOrderLimit,
+    WholesaleUnavailable,
+)
 from .inventory import (
     InsufficientInventory,
     InvalidItemQuantity,
@@ -25,6 +42,7 @@ from .inventory_service import (
     NonStackableQuantity,
     UnknownItem,
 )
+from .shops import ShopNotFound, ShopStore
 from .service import (
     BankingOperationError,
     BankingService,
@@ -63,12 +81,15 @@ class MCorp(commands.Cog):
         self.banking = BankingService(self.ledger, RedBankGateway())
         self.inventory_store = InventoryStore(self.ledger.database_path)
         self.inventory = InventoryService(self.inventory_store)
+        self.shop_store = ShopStore(self.ledger.database_path)
+        self.control = EconomyControlService(self.ledger, self.inventory, self.shop_store)
 
     async def cog_load(self) -> None:
         # The schema creation is small and happens once at cog load. Keeping it
         # synchronous also avoids executor lifecycle issues during Red startup.
         self.ledger.initialize()
         self.inventory_store.initialize()
+        self.shop_store.initialize()
 
     @commands.command()
     async def mcorp(self, ctx: commands.Context) -> None:
@@ -499,6 +520,174 @@ class MCorp(commands.Cog):
         """[Propriétaire] Consulte l'inventaire d'un membre."""
         await self._send_inventory(ctx, membre)
 
+    @commands.command()
+    @commands.guild_only()
+    @commands.is_owner()
+    async def shopcreate(
+        self,
+        ctx: commands.Context,
+        shop_id: str,
+        proprietaire: commands.MemberConverter,
+        *,
+        nom: str,
+    ) -> None:
+        """[Propriétaire] Crée une boutique de test administrable."""
+        institution_id, _ = await self._bank_context(ctx)
+        try:
+            shop = self.control.create_shop(
+                institution_id,
+                shop_id.upper(),
+                nom,
+                "USER",
+                str(proprietaire.id),
+                administrator_id=ctx.author.id,
+                license_required=True,
+                license_fee=0,
+                auto_restock_allowed=True,
+            )
+        except Exception as exc:
+            await self._send_control_error(ctx, exc)
+            return
+        await ctx.send(
+            f"Boutique **{shop.display_name}** créée (`{shop.shop_id}`). "
+            f"Statut : `{shop.status}`."
+        )
+
+    @commands.command()
+    @commands.guild_only()
+    @commands.is_owner()
+    async def shopinfo(self, ctx: commands.Context, shop_id: str) -> None:
+        """[Propriétaire] Affiche l'état économique d'une boutique."""
+        institution_id, _ = await self._bank_context(ctx)
+        try:
+            report = self.control.shop_report(institution_id, shop_id.upper())
+        except Exception as exc:
+            await self._send_control_error(ctx, exc)
+            return
+        stock = ", ".join(f"{item} ×{quantity}" for item, quantity in report.inventory.items())
+        await ctx.send(
+            f"**Boutique — {report.shop.display_name}** (`{report.shop.shop_id}`)\n"
+            f"Statut : `{report.shop.status}`\n"
+            f"Licence : `{report.shop.license_status}`\n"
+            f"Prochaine échéance : {report.shop.next_license_due_at or 'aucune'}\n"
+            f"Compte bancaire : {report.bank_balance} crédits\n"
+            f"Commission : {report.shop.commission_bps / 100:.2f} %\n"
+            f"Frais de restock : {report.shop.restock_fee_bps / 100:.2f} %\n"
+            f"Stock : {stock or 'vide'}\n"
+            f"Catalogue autorisé : {', '.join(report.wholesale_items) or 'aucun'}"
+        )
+
+    @commands.command()
+    @commands.guild_only()
+    @commands.is_owner()
+    async def shoplicense(self, ctx: commands.Context, shop_id: str) -> None:
+        """[Propriétaire] Déclenche le paiement manuel d'une licence."""
+        institution_id, _ = await self._bank_context(ctx)
+        try:
+            shop = self.control.pay_license(
+                institution_id, shop_id.upper(), administrator_id=ctx.author.id
+            )
+        except Exception as exc:
+            await self._send_control_error(ctx, exc)
+            return
+        await ctx.send(
+            f"Licence de `{shop.shop_id}` active. Échéance : "
+            f"{shop.next_license_due_at or 'non applicable'}."
+        )
+
+    @commands.command()
+    @commands.guild_only()
+    @commands.is_owner()
+    async def shopsetprice(
+        self, ctx: commands.Context, item_id: str, prix: int, *, raison: str | None = None
+    ) -> None:
+        """[Propriétaire] Définit un prix grossiste historisé."""
+        institution_id, _ = await self._bank_context(ctx)
+        try:
+            item = self.control.set_wholesale_item(
+                institution_id, item_id, prix, administrator_id=ctx.author.id, reason=raison
+            )
+        except Exception as exc:
+            await self._send_control_error(ctx, exc)
+            return
+        await ctx.send(f"Prix grossiste de `{item.item_id}` : {item.wholesale_price} crédits.")
+
+    @commands.command()
+    @commands.guild_only()
+    @commands.is_owner()
+    async def shopallowitem(self, ctx: commands.Context, shop_id: str, item_id: str) -> None:
+        """[Propriétaire] Autorise un objet grossiste pour une boutique."""
+        await self._set_shop_item_permission(ctx, shop_id, item_id, True)
+
+    @commands.command()
+    @commands.guild_only()
+    @commands.is_owner()
+    async def shopdenyitem(self, ctx: commands.Context, shop_id: str, item_id: str) -> None:
+        """[Propriétaire] Interdit un objet grossiste pour une boutique."""
+        await self._set_shop_item_permission(ctx, shop_id, item_id, False)
+
+    @commands.command()
+    @commands.guild_only()
+    @commands.is_owner()
+    async def shopsetrestock(
+        self,
+        ctx: commands.Context,
+        shop_id: str,
+        item_id: str,
+        seuil: int,
+        cible: int,
+        prix_max: int,
+        budget_max: int,
+    ) -> None:
+        """[Propriétaire] Configure la protection d'auto-restock d'un objet."""
+        institution_id, _ = await self._bank_context(ctx)
+        try:
+            policy = self.control.set_restock_policy(
+                institution_id, shop_id.upper(), item_id, enabled=True,
+                threshold=seuil, target_stock=cible, max_unit_price=prix_max,
+                max_total_spend=budget_max,
+            )
+        except Exception as exc:
+            await self._send_control_error(ctx, exc)
+            return
+        await ctx.send(
+            f"Restock `{policy.shop_id}/{policy.item_id}` activé : "
+            f"seuil {policy.threshold}, cible {policy.target_stock}."
+        )
+
+    @commands.command()
+    @commands.guild_only()
+    @commands.is_owner()
+    async def shoprestock(self, ctx: commands.Context, shop_id: str, item_id: str) -> None:
+        """[Propriétaire] Déclenche manuellement un restock protégé."""
+        institution_id, _ = await self._bank_context(ctx)
+        try:
+            quote = self.control.restock(
+                institution_id, shop_id.upper(), item_id, administrator_id=ctx.author.id
+            )
+        except Exception as exc:
+            await self._send_control_error(ctx, exc)
+            return
+        await ctx.send(
+            f"Restock terminé : `{quote.item_id}` ×{quote.quantity}. "
+            f"Stock {quote.stock_cost} + frais {quote.fee} = {quote.total_cost} crédits."
+        )
+
+    @commands.command()
+    @commands.guild_only()
+    @commands.is_owner()
+    async def produce(self, ctx: commands.Context, item_id: str, quantite: int) -> None:
+        """[Propriétaire] Produit un objet dans l'entrepôt M Corp."""
+        institution_id, _ = await self._bank_context(ctx)
+        try:
+            stock = self.control.produce_item(
+                institution_id, item_id, quantite, administrator_id=ctx.author.id
+            )
+        except Exception as exc:
+            await self._send_control_error(ctx, exc)
+            return
+        await ctx.send(f"Production : `{item_id.casefold()}` ×{quantite}. Stock M Corp : ×{stock}.")
+
     async def _bank_context(self, ctx: commands.Context) -> tuple[str, Any]:
         """Return the Red vault member and ledger institution for this context."""
         if ctx.guild is None or self.bot.user is None:
@@ -513,7 +702,23 @@ class MCorp(commands.Cog):
             institution_id = f"mcorp:guild:{ctx.guild.id}"
             institution_name = f"M Corp — {ctx.guild.name}"
         self.ledger.ensure_institution(institution_id, institution_name, vault.id)
+        self.control.ensure_official_shop(institution_id)
         return institution_id, vault
+
+    async def _set_shop_item_permission(
+        self, ctx: commands.Context, shop_id: str, item_id: str, allowed: bool
+    ) -> None:
+        institution_id, _ = await self._bank_context(ctx)
+        try:
+            self.control.set_item_permission(
+                institution_id, shop_id.upper(), item_id, allowed,
+                administrator_id=ctx.author.id,
+            )
+        except Exception as exc:
+            await self._send_control_error(ctx, exc)
+            return
+        state = "autorisé" if allowed else "interdit"
+        await ctx.send(f"Objet `{item_id.casefold()}` {state} pour `{shop_id.upper()}`.")
 
     async def _send_inventory(self, ctx: commands.Context, member: Any) -> None:
         """Combine the Red cash display with the distinct inventory source."""
@@ -608,3 +813,39 @@ class MCorp(commands.Cog):
             await ctx.send("Vous ne pouvez pas transférer un objet vers le même inventaire.")
         else:
             raise exc
+
+    @staticmethod
+    async def _send_control_error(ctx: commands.Context, exc: Exception) -> None:
+        if isinstance(exc, ShopNotFound):
+            await ctx.send("Boutique introuvable.")
+        elif isinstance(exc, InvalidControlValue):
+            await ctx.send("Paramètre économique invalide.")
+        elif isinstance(exc, ShopUnavailable):
+            await ctx.send("La boutique n'est pas active ; vérifiez sa licence et son statut.")
+        elif isinstance(exc, ShopItemDenied):
+            await ctx.send("Cet objet n'est pas autorisé pour cette boutique.")
+        elif isinstance(exc, (AutoRestockNotAllowed, AutoRestockDisabled)):
+            await ctx.send("Le réapprovisionnement automatique n'est pas actif pour cette règle.")
+        elif isinstance(exc, RestockThresholdNotReached):
+            await ctx.send("Le stock est encore supérieur au seuil de réapprovisionnement.")
+        elif isinstance(exc, WholesaleUnavailable):
+            await ctx.send("Cet objet n'est pas disponible au catalogue grossiste.")
+        elif isinstance(exc, WholesaleOrderLimit):
+            await ctx.send("La quantité calculée ne respecte pas les limites grossistes.")
+        elif isinstance(exc, UnitPriceLimitExceeded):
+            await ctx.send("Le prix grossiste dépasse le prix unitaire maximal autorisé.")
+        elif isinstance(exc, RestockBudgetExceeded):
+            await ctx.send("Le budget de réapprovisionnement de la période serait dépassé.")
+        elif isinstance(exc, ShopFundsInsufficient):
+            await ctx.send("Le compte bancaire de la boutique est insuffisant.")
+        elif isinstance(exc, WarehouseStockInsufficient):
+            await ctx.send(
+                f"Stock M Corp insuffisant pour `{exc.item_id}` : "
+                f"{exc.available} disponible(s), {exc.requested} requis."
+            )
+        elif isinstance(exc, ControlRecoveryRequired):
+            await ctx.send("Compensation incomplète : intervention et audit administrateur requis.")
+        elif isinstance(exc, ControlOperationFailed):
+            await ctx.send("Opération annulée et compensée après une erreur interne.")
+        else:
+            await MCorp._send_inventory_error(ctx, exc)
