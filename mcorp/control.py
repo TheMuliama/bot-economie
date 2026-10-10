@@ -17,9 +17,13 @@ from .inventory_service import InventoryService, UnknownItem
 from .ledger import LedgerStore
 from .shops import (
     LICENSE_ACTIVE,
-    LICENSE_NOT_REQUIRED,
     M_CORP_STORE_ID,
     SHOP_ACTIVE,
+    SHOP_LICENSE_EXPIRED,
+    SHOP_SUSPENDED,
+    LICENSE_EXPIRED,
+    ReconciliationSnapshot,
+    ControlEvent,
     VISIBILITY_PUBLIC,
     RestockPolicy,
     Shop,
@@ -441,6 +445,105 @@ class EconomyControlService:
             accessible,
             tuple(self.shops.list_restock_policies(institution_id, shop_id)),
         )
+
+    def list_shop_reports(self, institution_id: str) -> list[ShopReport]:
+        return [self.shop_report(institution_id, shop.shop_id) for shop in self.shops.list_shops(institution_id)]
+
+    def wholesale_catalog(self, institution_id: str) -> list[WholesaleItem]:
+        return self.shops.list_wholesale_items(institution_id)
+
+    def item_permissions(self, institution_id: str) -> list[dict[str, Any]]:
+        return self.shops.list_item_permissions(institution_id)
+
+    def inventory_distribution(self):
+        return self.inventory.store.inventory_distribution()
+
+    def audit_events(
+        self, institution_id: str, *, actor_id: str | None = None,
+        shop_id: str | None = None, event_type: str | None = None,
+        status: str | None = None, since: str | None = None, limit: int = 200,
+    ) -> list[ControlEvent]:
+        return self.shops.find_events(
+            institution_id, actor_id=actor_id, shop_id=shop_id,
+            event_type=event_type, status=status, since=since, limit=limit,
+        )
+
+    def configure_shop(
+        self, institution_id: str, shop_id: str, *, administrator_id: int,
+        display_name: str, license_required: bool, license_fee: int,
+        license_period_days: int, commission_bps: int,
+        payment_methods: tuple[str, ...], auto_restock_allowed: bool,
+        visibility: str, restock_fee_bps: int,
+    ) -> Shop:
+        current = self._shop(institution_id, shop_id)
+        self._validate_non_negative(license_fee)
+        self._validate_bps(commission_bps)
+        self._validate_bps(restock_fee_bps)
+        if not display_name.strip() or license_period_days <= 0:
+            raise InvalidControlValue("shop")
+        if not payment_methods or not set(payment_methods) <= {"BANK", "CASH"}:
+            raise InvalidControlValue("payment_methods")
+        updated = self.shops.update_shop(
+            institution_id, shop_id, display_name=display_name.strip(),
+            license_required=license_required, license_fee=license_fee,
+            license_period_days=license_period_days, commission_bps=commission_bps,
+            payment_methods=payment_methods, auto_restock_allowed=auto_restock_allowed,
+            visibility=visibility, restock_fee_bps=restock_fee_bps,
+        )
+        self.record_admin_action(
+            institution_id, "SHOP_CONFIGURED", str(administrator_id), "ADMIN",
+            shop_id, current.__dict__, updated.__dict__, None, shop_id=shop_id,
+        )
+        return updated
+
+    def set_shop_suspended(
+        self, institution_id: str, shop_id: str, suspended: bool, *,
+        actor_id: int, actor_role: str, reason: str,
+    ) -> Shop:
+        current = self._shop(institution_id, shop_id)
+        if shop_id == M_CORP_STORE_ID and suspended:
+            raise InvalidControlValue("official_shop")
+        if suspended:
+            status = SHOP_SUSPENDED
+        elif current.license_required and current.license_status == LICENSE_EXPIRED:
+            status = SHOP_LICENSE_EXPIRED
+        else:
+            status = SHOP_ACTIVE
+        updated = self.shops.set_shop_status(institution_id, shop_id, status)
+        self.record_admin_action(
+            institution_id, "SHOP_SUSPENDED" if suspended else "SHOP_RESUMED",
+            str(actor_id), actor_role, shop_id, current.status, updated.status,
+            reason, shop_id=shop_id,
+        )
+        return updated
+
+    def record_admin_action(
+        self, institution_id: str, action: str, actor_id: str, actor_role: str,
+        target: str, old_value: Any, new_value: Any, reason: str | None,
+        *, shop_id: str | None = None, status: str = "COMPLETED",
+    ) -> None:
+        self.shops.record_event(
+            institution_id, action, shop_id=shop_id, actor_id=actor_id, status=status,
+            metadata={
+                "actor_role": actor_role, "target": target,
+                "old_value": old_value, "new_value": new_value, "reason": reason,
+            },
+        )
+
+    def record_reconciliation_snapshot(
+        self, institution_id: str, vault_balance: int, *, checked_by: str | None = None,
+    ) -> ReconciliationSnapshot:
+        if vault_balance < 0:
+            raise InvalidControlValue("vault_balance")
+        return self.shops.record_reconciliation_snapshot(
+            institution_id, vault_balance,
+            self.ledger.total_cash_backed_balance(institution_id), checked_by=checked_by,
+        )
+
+    def latest_reconciliation_snapshot(
+        self, institution_id: str,
+    ) -> ReconciliationSnapshot | None:
+        return self.shops.latest_reconciliation_snapshot(institution_id)
 
     def _shop(self, institution_id: str, shop_id: str) -> Shop:
         shop = self.shops.get_shop(institution_id, shop_id)

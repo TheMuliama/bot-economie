@@ -122,6 +122,22 @@ class InventoryStore:
             totals.setdefault(str(row["item_id"]), {})[str(row["owner_type"])] = int(row["total"])
         return totals
 
+    def inventory_distribution(self) -> list[InventoryEntry]:
+        """Return every positive stock position for administrative reporting."""
+        with self._connection() as connection:
+            rows = connection.execute(
+                """SELECT owner_type, owner_id, item_id, quantity
+                   FROM inventory_items WHERE quantity > 0
+                   ORDER BY item_id, owner_type, owner_id"""
+            ).fetchall()
+        return [
+            InventoryEntry(
+                InventoryOwner(str(row["owner_type"]), str(row["owner_id"])),
+                str(row["item_id"]), int(row["quantity"]),
+            )
+            for row in rows
+        ]
+
     def production_totals(self) -> dict[str, int]:
         with self._connection() as connection:
             rows = connection.execute(

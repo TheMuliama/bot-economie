@@ -85,6 +85,17 @@ class ControlEvent:
     metadata: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class ReconciliationSnapshot:
+    institution_id: str
+    vault_balance: int
+    ledger_balance: int
+    difference: int
+    is_reconciled: bool
+    checked_at: str
+    checked_by: str | None
+
+
 class ShopStore:
     """SQLite repository used only through the economy control service."""
 
@@ -191,6 +202,20 @@ class ShopStore:
 
                 CREATE INDEX IF NOT EXISTS idx_control_events_institution_created
                     ON control_events(institution_id, created_at DESC);
+
+                CREATE TABLE IF NOT EXISTS reconciliation_snapshots (
+                    snapshot_id TEXT PRIMARY KEY,
+                    institution_id TEXT NOT NULL,
+                    vault_balance INTEGER NOT NULL CHECK (vault_balance >= 0),
+                    ledger_balance INTEGER NOT NULL CHECK (ledger_balance >= 0),
+                    difference INTEGER NOT NULL,
+                    is_reconciled INTEGER NOT NULL CHECK (is_reconciled IN (0, 1)),
+                    checked_at TEXT NOT NULL,
+                    checked_by TEXT
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_reconciliation_institution_checked
+                    ON reconciliation_snapshots(institution_id, checked_at DESC);
                 """
             )
 
@@ -253,6 +278,42 @@ class ShopStore:
                 "SELECT * FROM shops WHERE institution_id = ? ORDER BY shop_id", (institution_id,)
             ).fetchall()
         return [self._shop_from_row(row) for row in rows]
+
+    def update_shop(
+        self, institution_id: str, shop_id: str, *, display_name: str,
+        license_required: bool, license_fee: int, license_period_days: int,
+        commission_bps: int, payment_methods: tuple[str, ...],
+        auto_restock_allowed: bool, visibility: str, restock_fee_bps: int,
+    ) -> Shop:
+        with self._connection() as connection:
+            cursor = connection.execute(
+                """UPDATE shops SET display_name = ?, license_required = ?, license_fee = ?,
+                   license_period_days = ?, commission_bps = ?, payment_methods_json = ?,
+                   auto_restock_allowed = ?, public_visibility = ?, restock_fee_bps = ?
+                   WHERE institution_id = ? AND shop_id = ?""",
+                (
+                    display_name, int(license_required), license_fee, license_period_days,
+                    commission_bps, json.dumps(payment_methods), int(auto_restock_allowed),
+                    visibility, restock_fee_bps, institution_id, shop_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ShopNotFound(shop_id)
+        shop = self.get_shop(institution_id, shop_id)
+        assert shop is not None
+        return shop
+
+    def set_shop_status(self, institution_id: str, shop_id: str, status: str) -> Shop:
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "UPDATE shops SET status = ? WHERE institution_id = ? AND shop_id = ?",
+                (status, institution_id, shop_id),
+            )
+            if cursor.rowcount != 1:
+                raise ShopNotFound(shop_id)
+        shop = self.get_shop(institution_id, shop_id)
+        assert shop is not None
+        return shop
 
     def activate_license(
         self, institution_id: str, shop_id: str, next_due_at: str | None, actor_id: str
@@ -403,6 +464,16 @@ class ShopStore:
             ).fetchone()
         return row is not None and bool(row["can_purchase"])
 
+    def list_item_permissions(self, institution_id: str) -> list[dict[str, Any]]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                """SELECT shop_id, item_id, can_purchase, quota_per_period, updated_at
+                   FROM shop_item_permissions WHERE institution_id = ?
+                   ORDER BY item_id, shop_id""",
+                (institution_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def set_restock_policy(self, policy: RestockPolicy) -> None:
         with self._connection() as connection:
             connection.execute(
@@ -467,6 +538,71 @@ class ShopStore:
                 (institution_id, limit),
             ).fetchall()
         return [self._event_from_row(row) for row in rows]
+
+    def find_events(
+        self, institution_id: str, *, actor_id: str | None = None,
+        shop_id: str | None = None, event_type: str | None = None,
+        status: str | None = None, since: str | None = None, limit: int = 200,
+    ) -> list[ControlEvent]:
+        clauses = ["institution_id = ?"]
+        values: list[Any] = [institution_id]
+        for column, value in (
+            ("actor_id", actor_id), ("shop_id", shop_id),
+            ("event_type", event_type), ("status", status),
+        ):
+            if value:
+                clauses.append(f"{column} = ?")
+                values.append(value)
+        if since:
+            clauses.append("created_at >= ?")
+            values.append(since)
+        values.append(min(max(limit, 1), 500))
+        query = (
+            "SELECT * FROM control_events WHERE " + " AND ".join(clauses)
+            + " ORDER BY created_at DESC LIMIT ?"
+        )
+        with self._connection() as connection:
+            rows = connection.execute(query, values).fetchall()
+        return [self._event_from_row(row) for row in rows]
+
+    def record_reconciliation_snapshot(
+        self, institution_id: str, vault_balance: int, ledger_balance: int,
+        *, checked_by: str | None = None,
+    ) -> ReconciliationSnapshot:
+        checked_at = utc_now().isoformat()
+        difference = vault_balance - ledger_balance
+        with self._connection() as connection:
+            connection.execute(
+                """INSERT INTO reconciliation_snapshots (
+                    snapshot_id, institution_id, vault_balance, ledger_balance,
+                    difference, is_reconciled, checked_at, checked_by
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    str(uuid.uuid4()), institution_id, vault_balance, ledger_balance,
+                    difference, int(difference == 0), checked_at, checked_by,
+                ),
+            )
+        return ReconciliationSnapshot(
+            institution_id, vault_balance, ledger_balance, difference,
+            difference == 0, checked_at, checked_by,
+        )
+
+    def latest_reconciliation_snapshot(
+        self, institution_id: str,
+    ) -> ReconciliationSnapshot | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                """SELECT * FROM reconciliation_snapshots WHERE institution_id = ?
+                   ORDER BY checked_at DESC LIMIT 1""",
+                (institution_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return ReconciliationSnapshot(
+            str(row["institution_id"]), int(row["vault_balance"]),
+            int(row["ledger_balance"]), int(row["difference"]),
+            bool(row["is_reconciled"]), str(row["checked_at"]), row["checked_by"],
+        )
 
     def _connection(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.database_path)
