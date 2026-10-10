@@ -126,6 +126,8 @@ class EconomyControlService:
         access_policy: dict[str, Any] | None = None,
     ) -> Shop:
         self._validate_shop_id(shop_id)
+        if self.shops.get_shop(institution_id, shop_id) is not None:
+            raise ShopAlreadyExists(shop_id)
         self._validate_non_negative(license_fee)
         self._validate_bps(commission_bps)
         self._validate_bps(restock_fee_bps)
@@ -468,6 +470,10 @@ class InvalidControlValue(ControlError):
 
 
 class ShopUnavailable(ControlError):
+    pass
+
+
+class ShopAlreadyExists(ControlError):
     pass
 
 

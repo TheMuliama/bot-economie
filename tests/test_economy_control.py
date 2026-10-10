@@ -15,6 +15,7 @@ from mcorp.control import (
     RestockBudgetExceeded,
     RestockThresholdNotReached,
     ShopFundsInsufficient,
+    ShopAlreadyExists,
     ShopItemDenied,
     UnitPriceLimitExceeded,
     WarehouseStockInsufficient,
@@ -91,6 +92,11 @@ class EconomyControlTests(unittest.TestCase):
         self.assertEqual(created.shop_id, SHOP_ID)
         self.assertEqual(persisted.display_name, "Boutique Lucas")
         self.assertEqual(persisted.status, SHOP_LICENSE_EXPIRED)
+
+    def test_duplicate_shop_id_is_refused_cleanly(self) -> None:
+        self.create_shop()
+        with self.assertRaises(ShopAlreadyExists):
+            self.create_shop()
 
     def test_shop_has_covered_checking_account(self) -> None:
         self.create_shop()

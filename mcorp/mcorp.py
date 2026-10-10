@@ -19,6 +19,7 @@ from .control import (
     InvalidControlValue,
     RestockBudgetExceeded,
     RestockThresholdNotReached,
+    ShopAlreadyExists,
     ShopFundsInsufficient,
     ShopItemDenied,
     ShopUnavailable,
@@ -818,6 +819,8 @@ class MCorp(commands.Cog):
     async def _send_control_error(ctx: commands.Context, exc: Exception) -> None:
         if isinstance(exc, ShopNotFound):
             await ctx.send("Boutique introuvable.")
+        elif isinstance(exc, ShopAlreadyExists):
+            await ctx.send("Une boutique utilise déjà cet identifiant.")
         elif isinstance(exc, InvalidControlValue):
             await ctx.send("Paramètre économique invalide.")
         elif isinstance(exc, ShopUnavailable):
@@ -838,6 +841,8 @@ class MCorp(commands.Cog):
             await ctx.send("Le budget de réapprovisionnement de la période serait dépassé.")
         elif isinstance(exc, ShopFundsInsufficient):
             await ctx.send("Le compte bancaire de la boutique est insuffisant.")
+        elif isinstance(exc, InsufficientLedgerFunds):
+            await ctx.send(f"Le compte bancaire concerné ne contient que {exc.balance} crédits.")
         elif isinstance(exc, WarehouseStockInsufficient):
             await ctx.send(
                 f"Stock M Corp insuffisant pour `{exc.item_id}` : "
