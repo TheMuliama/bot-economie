@@ -291,7 +291,7 @@ class MCorp(commands.Cog):
     async def transactions(self, ctx: commands.Context) -> None:
         """Affiche vos dix dernières opérations M Corp."""
         institution_id, _ = await self._bank_context(ctx)
-        entries = self.ledger.recent_transactions(institution_id, ctx.author.id)
+        entries = self.ledger.recent_banking_transactions(institution_id, ctx.author.id)
         if not entries:
             await ctx.send("Aucune transaction M Corp pour le moment.")
             return

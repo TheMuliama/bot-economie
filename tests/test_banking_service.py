@@ -398,6 +398,16 @@ class BankingServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([entry.transaction_type for entry in alice_entries], ["BANK_TRANSFER", "CASH_DEPOSIT"])
         self.assertEqual([entry.transaction_type for entry in bob_entries], ["BANK_TRANSFER"])
 
+    async def test_direct_cash_audit_is_excluded_from_banking_history(self) -> None:
+        await self.service.deposit(INSTITUTION_ID, self.alice, self.vault, 100)
+        await self.service.cash_transfer(INSTITUTION_ID, self.alice, self.bob, 20)
+
+        audit_entries = self.ledger.recent_transactions(INSTITUTION_ID, self.alice.id)
+        banking_entries = self.ledger.recent_banking_transactions(INSTITUTION_ID, self.alice.id)
+
+        self.assertEqual(audit_entries[0].transaction_type, "PLAYER_CASH_TRANSFER")
+        self.assertEqual([entry.transaction_type for entry in banking_entries], ["CASH_DEPOSIT"])
+
     async def test_cash_transfer_destination_failure_is_compensated(self) -> None:
         self.bank.fail_deposits_for.add(self.bob.id)
 

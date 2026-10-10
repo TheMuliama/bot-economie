@@ -463,6 +463,7 @@ class LedgerStore:
     def recent_transactions(
         self, institution_id: str, user_id: int, limit: int = 10
     ) -> list[LedgerTransaction]:
+        """Return every internal ledger event involving a participant."""
         with self._connection() as connection:
             rows = connection.execute(
                 """
@@ -470,6 +471,31 @@ class LedgerStore:
                 FROM ledger_transactions AS t
                 JOIN transaction_participants AS p ON p.transaction_id = t.transaction_id
                 WHERE t.institution_id = ? AND p.owner_id = ?
+                ORDER BY t.created_at DESC
+                LIMIT ?
+                """,
+                (institution_id, str(user_id), limit),
+            ).fetchall()
+        return [self._transaction_from_row(row) for row in rows]
+
+    def recent_banking_transactions(
+        self, institution_id: str, user_id: int, limit: int = 10
+    ) -> list[LedgerTransaction]:
+        """Return account history while keeping direct-cash audit events private.
+
+        Cash gifts and owner cash adjustments remain immutable internal audit
+        records in ``ledger_transactions`` but are not account operations.
+        """
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT DISTINCT t.*
+                FROM ledger_transactions AS t
+                JOIN transaction_participants AS p ON p.transaction_id = t.transaction_id
+                WHERE t.institution_id = ? AND p.owner_id = ?
+                  AND t.transaction_type NOT IN (
+                      'PLAYER_CASH_TRANSFER', 'ADMIN_CREDIT', 'ADMIN_DEBIT'
+                  )
                 ORDER BY t.created_at DESC
                 LIMIT ?
                 """,
