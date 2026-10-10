@@ -111,6 +111,87 @@ migrations sont additives via `CREATE TABLE IF NOT EXISTS` : les données du
 ledger existant sont préservées. Le prototype historique `bot.py`,
 `database.py` et `mcorp.db` n'est ni lu, ni modifié, ni migré.
 
+## Control plane économique — Phase 3.5
+
+La répartition des rôles est désormais explicite :
+
+- **M Corp** produit les objets communs, tient l'entrepôt `SYSTEM/M_CORP`,
+  exploite le catalogue grossiste et reçoit licences, commissions et frais ;
+- une **boutique** est une entité économique indépendante avec compte bancaire
+  couvert `SHOP/CHECKING`, inventaire `SHOP`, licence et politiques propres ;
+- le **joueur** reste le futur consommateur. Aucun parcours `m!boutique` ou
+  `m!acheter` n'est encore exposé.
+
+Le module `mcorp/shops.py` ajoute, dans le même `ledger.sqlite3`, des tables
+additives pour les boutiques, stocks inclus dans les licences, prix grossistes
+et leur historique, permissions par objet, politiques de restock et événements
+de contrôle. `mcorp/control.py` fournit `EconomyControlService`, façade métier
+destinée aux commandes Discord puis au dashboard web. Un futur dashboard doit
+appeler cette façade et ne jamais écrire directement dans SQLite.
+
+### Boutiques, licences et paiement
+
+Une boutique conserve son propriétaire, son statut (`ACTIVE`, `SUSPENDED`,
+`LICENSE_EXPIRED`, `CLOSED`), sa visibilité, ses méthodes de paiement
+(`BANK`/`CASH`), ses frais en points de base et une politique d'accès JSON
+extensible. Une licence peut avoir un prix, une période et un stock inclus.
+Le paiement transfère le coût du compte couvert de la boutique vers la
+trésorerie, puis déplace réellement le stock de l'entrepôt vers la boutique.
+Un manque de permission ou de stock empêche l'opération ; un échec intermédiaire
+déclenche une compensation et peut produire `RECOVERY_REQUIRED`.
+
+La boutique officielle `M_CORP_STORE` utilise exactement le même modèle avec
+licence, commission et frais de restock à zéro. Sa licence est
+`NOT_REQUIRED`.
+
+### Production, grossiste et restock
+
+`produce_item()` crédite l'entrepôt et journalise `ITEM_PRODUCTION`, ce qui
+reste distinct d'un `ITEM_ADMIN_GRANT`. Le catalogue grossiste persistant
+indique prix, disponibilité et limites de commande ; chaque changement de prix
+est historisé avec acteur et raison. Les permissions `SHOP_ITEM_ALLOWED` et
+`SHOP_ITEM_DENIED` sont spécifiques à chaque boutique.
+
+Une règle de restock contient seuil, stock cible, prix unitaire maximal, budget
+maximal de période et dépense courante. Le devis calcule :
+
+```text
+coût du stock + frais de restock = coût total boutique
+```
+
+Le moteur vérifie statut/licence, activation, seuil, permission, disponibilité,
+limites, prix maximal, budget, compte boutique et stock M Corp. L'argent est
+ensuite transféré vers la trésorerie et le stock vers la boutique. SQLite ne
+fournissant pas une transaction distribuée entre les deux dépôts, le second
+échec rembourse le compte boutique ; un échec de compensation est audité.
+
+La future vente dispose déjà de `calculate_sale_split()` et
+`apply_sale_split()`. Cette dernière ventile atomiquement dans le ledger un
+paiement couvert entre compte boutique et trésorerie, sans implémenter le
+checkout joueur ni le transfert de marchandise de Phase 4.
+
+### Commandes administratives temporaires
+
+- `m!shopcreate SHOP_ID @propriétaire Nom de la boutique`
+- `m!shopinfo SHOP_ID`
+- `m!shoplicense SHOP_ID`
+- `m!shopsetprice item prix [raison]`
+- `m!shopallowitem SHOP_ID item`
+- `m!shopdenyitem SHOP_ID item`
+- `m!shopsetrestock SHOP_ID item seuil cible prix_max budget_max`
+- `m!shoprestock SHOP_ID item`
+- `m!produce item quantité`
+
+Toutes sont owner-only. Les rapports Python exposent les montants couverts par
+type de propriétaire, la trésorerie, les stocks/productions par objet, ainsi
+que le compte, la licence, le stock, les accès grossistes et les politiques de
+chaque boutique. Les événements de contrôle sont récupérables via
+`ShopStore.recent_events()` derrière le service administratif.
+
+Les migrations utilisent exclusivement `CREATE TABLE IF NOT EXISTS` et ne
+suppriment ni ne réécrivent les données Phase 3. Le prototype autonome reste
+hors circuit.
+
 ## Trésorerie institutionnelle — Phase 2
 
 Les opérations institutionnelles sont exclusivement des transferts SQLite
