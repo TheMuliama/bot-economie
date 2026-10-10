@@ -142,6 +142,44 @@ class MCorp(commands.Cog):
             f"Votre compte bancaire contient maintenant {source_balance} crédits."
         )
 
+    @commands.command()
+    @commands.guild_only()
+    async def payermcorp(self, ctx: commands.Context, montant: int) -> None:
+        """Transfère des crédits de votre compte bancaire vers M Corp."""
+        institution_id, vault = await self._bank_context(ctx)
+        try:
+            player_balance, treasury_balance = await self.banking.pay_treasury(
+                institution_id, ctx.author, vault, montant
+            )
+        except Exception as exc:
+            await self._send_operation_error(ctx, exc)
+            return
+        await ctx.send(
+            f"Paiement de {montant} crédits à M Corp effectué.\n"
+            f"Votre compte : {player_balance} crédits\n"
+            f"Trésorerie M Corp : {treasury_balance} crédits"
+        )
+
+    @commands.command()
+    @commands.guild_only()
+    async def tresorerie(self, ctx: commands.Context) -> None:
+        """Affiche la situation couverte de la trésorerie M Corp."""
+        institution_id, vault = await self._bank_context(ctx)
+        try:
+            report = await self.banking.economy_report(institution_id, vault)
+        except Exception as exc:
+            await self._send_operation_error(ctx, exc)
+            return
+        currency = await bank.get_currency_name(ctx.guild)
+        state = "OK" if report.reconciliation.is_balanced else "ANOMALIE"
+        await ctx.send(
+            "**Trésorerie M Corp**\n"
+            f"Trésorerie M Corp : {report.stats.treasury_balance} crédits\n"
+            f"Total comptes couverts : {report.reconciliation.ledger_total} crédits\n"
+            f"Coffre Red : {report.reconciliation.vault_balance} {currency}\n"
+            f"État : **{state}**"
+        )
+
     @commands.command(name="transactions")
     @commands.guild_only()
     async def transactions(self, ctx: commands.Context) -> None:
@@ -210,6 +248,34 @@ class MCorp(commands.Cog):
     @commands.command()
     @commands.guild_only()
     @commands.is_owner()
+    async def prime(
+        self, ctx: commands.Context, membre: commands.MemberConverter, montant: int
+    ) -> None:
+        """[Propriétaire] Verse une prime depuis la trésorerie M Corp."""
+        institution_id, vault = await self._bank_context(ctx)
+        if membre.id == vault.id:
+            await ctx.send("Le coffre ne peut pas recevoir une prime de trésorerie.")
+            return
+        try:
+            treasury_balance, recipient_balance = await self.banking.pay_from_treasury(
+                institution_id,
+                membre,
+                vault,
+                montant,
+                administrator=ctx.author,
+            )
+        except Exception as exc:
+            await self._send_operation_error(ctx, exc)
+            return
+        await ctx.send(
+            f"Prime de {montant} crédits versée à {membre.mention}.\n"
+            f"Trésorerie restante : {treasury_balance} crédits\n"
+            f"Compte de {membre.display_name} : {recipient_balance} crédits"
+        )
+
+    @commands.command()
+    @commands.guild_only()
+    @commands.is_owner()
     async def bankinit(self, ctx: commands.Context, confirmer: str | None = None) -> None:
         """[Propriétaire] Initialise une fois le coffre M Corp.
 
@@ -257,6 +323,31 @@ class MCorp(commands.Cog):
             f"Ledger total : {report.ledger_total} crédits\n"
             f"Différence : {report.difference} crédits\n\n"
             f"État : **{state}**"
+        )
+
+    @commands.command()
+    @commands.guild_only()
+    @commands.is_owner()
+    async def economycheck(self, ctx: commands.Context) -> None:
+        """[Propriétaire] Affiche les flux cumulés de la trésorerie M Corp."""
+        institution_id, vault = await self._bank_context(ctx)
+        try:
+            report = await self.banking.economy_report(institution_id, vault)
+        except Exception as exc:
+            await self._send_operation_error(ctx, exc)
+            return
+        currency = await bank.get_currency_name(ctx.guild)
+        state = "OK" if report.reconciliation.is_balanced else "ANOMALIE"
+        await ctx.send(
+            "**Contrôle économique M Corp**\n"
+            f"Trésorerie : {report.stats.treasury_balance} crédits\n"
+            f"Entrées cumulées : {report.stats.total_received} crédits\n"
+            f"Sorties cumulées : {report.stats.total_paid} crédits\n"
+            f"Flux net : {report.stats.net_flow:+d} crédits\n"
+            f"Opérations institutionnelles : {report.stats.operation_count}\n"
+            f"Coffre Red : {report.reconciliation.vault_balance} {currency}\n"
+            f"Ledger couvert : {report.reconciliation.ledger_total} crédits\n"
+            f"Invariant : **{state}**"
         )
 
     async def _bank_context(self, ctx: commands.Context) -> tuple[str, Any]:
