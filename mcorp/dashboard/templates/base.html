@@ -10,15 +10,15 @@
   <header><a class="brand" href="/">M CORP <span>CONTROL</span></a>{% if user %}<span>{{ user.username }} · {{ user.role.value }}</span>{% endif %}</header>
   {% if user %}
   <nav aria-label="Navigation principale">
-    <a href="/">Vue générale</a><a href="/shops">Boutiques</a><a href="/stocks">Stocks</a>
-    {% if user.role.value == 'ADMIN' %}<a href="/production">Production</a>{% endif %}
-    <a href="/wholesale">Grossiste</a><a href="/permissions">Permissions</a>
-    <a href="/restock">Restock</a><a href="/licenses">Licences</a>
-    <a href="/audit">Audit</a><a href="/alerts">Alertes</a>
+    <a href="/">Vue générale</a>
+    <a href="/shops">Boutiques</a>
+    <a href="/stocks">Stocks</a>
+    <a href="/wholesale">Grossiste</a>
+    <a href="/audit">Audit</a>
     {% if user.role.value == 'ADMIN' %}<a href="/admin">Administration</a>{% endif %}
   </nav>
   {% endif %}
-  <main>{% block content %}{% endblock %}</main>
+  <main>{% if notice %}<p class="notice" role="status">{{ notice }}</p>{% endif %}{% block content %}{% endblock %}</main>
   <footer>{% if user %}<form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="link">Déconnexion</button></form>{% endif %}</footer>
 </body>
 </html>

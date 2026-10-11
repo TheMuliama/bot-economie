@@ -28,6 +28,7 @@ class OAuthIdentity:
     username: str
     guild_owner: bool
     role_ids: frozenset[str]
+    nickname: str | None = None
 
 
 class DiscordOAuthClient:
@@ -81,9 +82,12 @@ class DiscordOAuthClient:
             if guild is None:
                 raise AccessDenied("Serveur Discord configuré introuvable")
             member = member_response.json()
+            username = str(user.get("global_name") or user["username"])
+            nickname = member.get("nick")
             return OAuthIdentity(
-                str(user["id"]), str(user.get("global_name") or user["username"]),
+                str(user["id"]), username,
                 bool(guild.get("owner")), frozenset(str(role) for role in member.get("roles", [])),
+                None if nickname is None else str(nickname),
             )
         except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
             raise OAuthError("Échec de la validation Discord OAuth2") from exc
@@ -98,4 +102,4 @@ class DiscordOAuthClient:
             role = DashboardRole.MODERATOR
         else:
             raise AccessDenied("Aucun rôle dashboard autorisé")
-        return DashboardUser(identity.user_id, identity.username, role)
+        return DashboardUser(identity.user_id, identity.nickname or identity.username, role)

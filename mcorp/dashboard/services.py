@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +13,21 @@ from ..inventory_service import InventoryService
 from ..ledger import LedgerStore
 from ..shops import LICENSE_EXPIRED, SHOP_ACTIVE, ShopStore
 from .permissions import DashboardUser
+from .identities import DiscordIdentityStore
 from .scheduler import ProductionScheduleStore
+
+
+@dataclass(frozen=True)
+class UnifiedAuditEvent:
+    created_at: str
+    event_type: str
+    actor_id: str | None
+    shop_id: str | None
+    status: str
+    metadata: dict[str, Any]
+    source: str
+    transaction_id: str | None = None
+    user_ids: tuple[str, ...] = ()
 
 
 class DashboardService:
@@ -21,11 +35,13 @@ class DashboardService:
 
     def __init__(
         self, control: EconomyControlService, schedules: ProductionScheduleStore,
-        institution_id: str,
+        institution_id: str, identities: DiscordIdentityStore | None = None,
     ) -> None:
         self.control = control
         self.schedules = schedules
         self.institution_id = institution_id
+        self.identities = identities or DiscordIdentityStore(control.ledger.database_path)
+        self.identities.initialize()
 
     @classmethod
     def from_database(cls, database_path: Path, institution_id: str) -> "DashboardService":
@@ -52,6 +68,7 @@ class DashboardService:
             "restock_errors": sum(event.event_type == "WHOLESALE_PURCHASE" and event.status != "COMPLETED" for event in events),
             "recovery_required": sum(event.status == "RECOVERY_REQUIRED" for event in events),
             "items": self.control.item_metrics(),
+            "alerts": self.alerts(),
         }
 
     def shop_reports(self):
@@ -63,14 +80,107 @@ class DashboardService:
     def license_stock_rules(self, shop_id: str) -> dict[str, int]:
         return self.control.license_stock_rules(self.institution_id, shop_id)
 
+    def shop_detail_data(self, shop_id: str) -> dict[str, Any]:
+        return {
+            "report": self.shop_report(shop_id),
+            "license_stock": self.license_stock_rules(shop_id),
+            "supply_rows": self.shop_supply_rows(shop_id),
+            "catalog": tuple(ITEM_CATALOG.values()),
+        }
+
     def stock_data(self) -> dict[str, Any]:
+        shops = {report.shop.shop_id: report.shop.display_name for report in self.shop_reports()}
+        distribution = []
+        for entry in self.control.inventory_distribution():
+            if entry.owner.owner_type == "USER":
+                display_owner = self.identities.known_nickname(entry.owner.owner_id)
+                display_owner = display_owner or f"Discord {entry.owner.owner_id}"
+            elif entry.owner.owner_type == "SHOP":
+                display_owner = shops.get(entry.owner.owner_id, entry.owner.owner_id)
+            elif entry.owner.owner_type == "SYSTEM" and entry.owner.owner_id == "M_CORP":
+                display_owner = "ENTREPÔT M CORP"
+            else:
+                display_owner = entry.owner.owner_id
+            distribution.append({
+                "owner": entry.owner, "item_id": entry.item_id,
+                "quantity": entry.quantity, "display_owner": display_owner,
+            })
         return {
             "metrics": self.control.item_metrics(),
-            "distribution": self.control.inventory_distribution(),
+            "distribution": distribution,
         }
+
+    def remember_discord_identity(self, discord_id: str, nickname: str) -> None:
+        self.identities.remember_known_nickname(discord_id, nickname)
 
     def wholesale_items(self):
         return self.control.wholesale_catalog(self.institution_id)
+
+    def warehouse_rows(self) -> list[dict[str, Any]]:
+        metrics = {metric.item_id: metric for metric in self.control.item_metrics()}
+        return [
+            {
+                "item": item,
+                "metric": metrics.get(item.item_id),
+            }
+            for item in ITEM_CATALOG.values()
+        ]
+
+    def shop_supply_rows(self, shop_id: str) -> list[dict[str, Any]]:
+        report = self.shop_report(shop_id)
+        permissions = {
+            row["item_id"]: bool(row["can_purchase"])
+            for row in self.control.item_permissions(self.institution_id)
+            if row["shop_id"] == shop_id
+        }
+        policies = {policy.item_id: policy for policy in report.restock_policies}
+        wholesale = {item.item_id: item for item in self.wholesale_items()}
+        rows: list[dict[str, Any]] = []
+        for item in ITEM_CATALOG.values():
+            policy = policies.get(item.item_id)
+            state, reason = "non configuré", None
+            if policy is not None:
+                try:
+                    self.control.calculate_restock_quote(
+                        self.institution_id, shop_id, item.item_id
+                    )
+                    state = "prêt"
+                except ControlError as exc:
+                    state, reason = "bloqué", type(exc).__name__
+            rows.append({
+                "item": item,
+                "allowed": permissions.get(item.item_id, False),
+                "policy": policy,
+                "stock": report.inventory.get(item.item_id, 0),
+                "wholesale": wholesale.get(item.item_id),
+                "state": state,
+                "reason": reason,
+            })
+        return rows
+
+    def wholesale_data(self, selected_shop_id: str | None = None) -> dict[str, Any]:
+        reports = self.shop_reports()
+        selected = next(
+            (report for report in reports if report.shop.shop_id == selected_shop_id),
+            reports[0] if reports else None,
+        )
+        return {
+            "warehouse_rows": self.warehouse_rows(),
+            "items": self.wholesale_items(),
+            "catalog": tuple(ITEM_CATALOG.values()),
+            "schedules": self.schedules.list(self.institution_id),
+            "shops": [report.shop for report in reports],
+            "selected_shop": None if selected is None else selected.shop,
+            "supply_rows": [] if selected is None else self.shop_supply_rows(selected.shop.shop_id),
+            "history": [
+                event for event in self.control.audit_events(self.institution_id, limit=100)
+                if event.event_type in {
+                    "DASHBOARD_PRODUCTION", "SCHEDULED_PRODUCTION",
+                    "WHOLESALE_PURCHASE", "WHOLESALE_PRICE_CHANGE",
+                    "DASHBOARD_WHOLESALE_UPDATE",
+                }
+            ][:20],
+        }
 
     def permissions_matrix(self) -> dict[str, Any]:
         values = {
@@ -83,8 +193,74 @@ class DashboardService:
             "values": values,
         }
 
-    def audit(self, **filters: Any):
-        return self.control.audit_events(self.institution_id, **filters)
+    def audit(self, **filters: Any) -> list[UnifiedAuditEvent]:
+        """Merge existing control, ledger and inventory journals for read-only display."""
+        events = [
+            UnifiedAuditEvent(
+                event.created_at, event.event_type, event.actor_id, event.shop_id,
+                event.status, event.metadata, "Contrôle",
+                str(event.metadata.get("transaction_id"))
+                if event.metadata.get("transaction_id") is not None else None,
+                tuple(str(event.metadata.get(key)) for key in ("user_id", "buyer_user_id") if event.metadata.get(key) is not None),
+            )
+            for event in self.control.audit_events(self.institution_id, limit=500)
+        ]
+        for transaction, participants in self.control.ledger.audit_transactions(
+            self.institution_id, limit=500
+        ):
+            actor = transaction.metadata.get("administrator_id") or transaction.metadata.get("initiator_id")
+            events.append(UnifiedAuditEvent(
+                transaction.created_at, transaction.transaction_type,
+                None if actor is None else str(actor),
+                None if transaction.metadata.get("shop_id") is None else str(transaction.metadata["shop_id"]),
+                transaction.status,
+                {**transaction.metadata, "amount": transaction.amount, "participants": participants},
+                "Banque", transaction.transaction_id, participants,
+            ))
+        for transaction in self.control.inventory.store.audit_transactions(limit=500):
+            actor = transaction.metadata.get("administrator_id") or transaction.metadata.get("initiator_id")
+            owners = tuple(
+                owner.owner_id for owner in (transaction.source_owner, transaction.destination_owner)
+                if owner is not None and owner.owner_type == "USER"
+            )
+            shop = next((
+                owner.owner_id for owner in (transaction.source_owner, transaction.destination_owner)
+                if owner is not None and owner.owner_type == "SHOP"
+            ), None)
+            events.append(UnifiedAuditEvent(
+                transaction.created_at, transaction.transaction_type,
+                None if actor is None else str(actor), shop, transaction.status,
+                {
+                    **transaction.metadata, "item_id": transaction.item_id,
+                    "quantity": transaction.quantity,
+                    "source": None if transaction.source_owner is None else asdict(transaction.source_owner),
+                    "destination": None if transaction.destination_owner is None else asdict(transaction.destination_owner),
+                },
+                "Objets", transaction.transaction_id, owners,
+            ))
+
+        actor_id = filters.get("actor_id")
+        shop_id = filters.get("shop_id")
+        event_type = filters.get("event_type")
+        event_status = filters.get("status")
+        since = filters.get("since")
+        user_id = filters.get("user_id")
+        transaction_id = filters.get("transaction_id")
+        if actor_id:
+            events = [event for event in events if event.actor_id == actor_id]
+        if shop_id:
+            events = [event for event in events if event.shop_id == shop_id]
+        if event_type:
+            events = [event for event in events if event.event_type == event_type]
+        if event_status:
+            events = [event for event in events if event.status == event_status]
+        if since:
+            events = [event for event in events if event.created_at >= since]
+        if user_id:
+            events = [event for event in events if user_id in event.user_ids]
+        if transaction_id:
+            events = [event for event in events if event.transaction_id == transaction_id]
+        return sorted(events, key=lambda event: event.created_at, reverse=True)[:200]
 
     def restock_rows(self) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []

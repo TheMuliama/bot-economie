@@ -89,7 +89,22 @@ def _configuration_error_app(exc: ConfigurationError) -> FastAPI:
     return application
 
 
-try:
-    app = create_app()
-except ConfigurationError as configuration_error:
-    app = _configuration_error_app(configuration_error)
+class LazyDashboardApplication:
+    """Delay environment and database access until the ASGI server actually starts."""
+
+    def __init__(self) -> None:
+        self._application: FastAPI | None = None
+
+    def _get_application(self) -> FastAPI:
+        if self._application is None:
+            try:
+                self._application = create_app()
+            except ConfigurationError as configuration_error:
+                self._application = _configuration_error_app(configuration_error)
+        return self._application
+
+    async def __call__(self, scope, receive, send) -> None:
+        await self._get_application()(scope, receive, send)
+
+
+app = LazyDashboardApplication()

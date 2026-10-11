@@ -26,8 +26,15 @@ def build_router(service: DashboardService, oauth: DiscordOAuthClient) -> APIRou
             pass
         return request.app.state.templates.TemplateResponse(
             request=request, name=template,
-            context={"user": user, "csrf_token": request.session.get("csrf_token", ""), **context},
+            context={
+                "user": user, "csrf_token": request.session.get("csrf_token", ""),
+                "notice": request.session.pop("notice", None), **context,
+            },
         )
+
+    def redirect_after_action(request: Request, location: str, notice: str):
+        request.session["notice"] = notice
+        return RedirectResponse(location, status_code=status.HTTP_303_SEE_OTHER)
 
     @router.get("/login", name="login")
     async def login(request: Request):
@@ -45,12 +52,14 @@ def build_router(service: DashboardService, oauth: DiscordOAuthClient) -> APIRou
         if not expected or not hmac.compare_digest(expected, state):
             raise HTTPException(status.HTTP_403_FORBIDDEN, "État OAuth invalide")
         try:
-            user = oauth.authorize(await oauth.exchange(code))
+            identity = await oauth.exchange(code)
+            user = oauth.authorize(identity)
         except AccessDenied as exc:
             return render(request, "denied.html", message=str(exc))
         except OAuthError as exc:
             raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
         request.session.clear()
+        service.remember_discord_identity(user.discord_id, user.username)
         request.session["identity"] = {
             "discord_id": user.discord_id, "username": user.username, "role": user.role.value,
         }
@@ -86,15 +95,12 @@ def build_router(service: DashboardService, oauth: DiscordOAuthClient) -> APIRou
         user = require_admin(request)
         require_csrf(request, csrf_token)
         service.create_shop(user, shop_id, display_name, owner_type, owner_id, reason)
-        return RedirectResponse(f"/shops/{shop_id}", status_code=status.HTTP_303_SEE_OTHER)
+        return redirect_after_action(request, f"/shops/{shop_id}", "Boutique créée.")
 
     @router.get("/shops/{shop_id}", name="shop_detail")
     async def shop_detail(request: Request, shop_id: str):
         current_user(request)
-        return render(
-            request, "shop_detail.html", report=service.shop_report(shop_id),
-            license_stock=service.license_stock_rules(shop_id),
-        )
+        return render(request, "shop_detail.html", **service.shop_detail_data(shop_id))
 
     @router.post("/shops/{shop_id}/configure", name="configure_shop")
     async def configure_shop(
@@ -120,7 +126,7 @@ def build_router(service: DashboardService, oauth: DiscordOAuthClient) -> APIRou
             auto_restock_allowed=auto_restock_allowed, visibility=visibility,
             restock_fee_bps=restock_fee_bps,
         )
-        return RedirectResponse(f"/shops/{shop_id}", status_code=status.HTTP_303_SEE_OTHER)
+        return redirect_after_action(request, f"/shops/{shop_id}", "Configuration enregistrée.")
 
     @router.post("/shops/{shop_id}/suspension", name="shop_suspension")
     async def shop_suspension(
@@ -131,7 +137,7 @@ def build_router(service: DashboardService, oauth: DiscordOAuthClient) -> APIRou
         user = require_admin(request)
         require_csrf(request, csrf_token)
         service.suspend_shop(user, shop_id, suspended, reason)
-        return RedirectResponse(f"/shops/{shop_id}", status_code=status.HTTP_303_SEE_OTHER)
+        return redirect_after_action(request, f"/shops/{shop_id}", "Statut de la boutique mis à jour.")
 
     @router.get("/stocks", name="stocks")
     async def stocks(request: Request):
@@ -140,11 +146,8 @@ def build_router(service: DashboardService, oauth: DiscordOAuthClient) -> APIRou
 
     @router.get("/production", name="production")
     async def production(request: Request):
-        user = require_admin(request)
-        return render(
-            request, "production.html", items=ITEM_CATALOG.values(),
-            schedules=service.schedules.list(service.institution_id), user=user,
-        )
+        current_user(request)
+        return RedirectResponse("/wholesale", status_code=status.HTTP_303_SEE_OTHER)
 
     @router.post("/production", name="produce")
     async def produce(
@@ -156,7 +159,7 @@ def build_router(service: DashboardService, oauth: DiscordOAuthClient) -> APIRou
         user = require_admin(request)
         require_csrf(request, csrf_token)
         service.produce(user, item_id, quantity, reason)
-        return RedirectResponse("/production", status_code=status.HTTP_303_SEE_OTHER)
+        return redirect_after_action(request, "/wholesale", "Production enregistrée.")
 
     @router.post("/production/schedules", name="create_schedule")
     async def create_schedule(
@@ -168,7 +171,7 @@ def build_router(service: DashboardService, oauth: DiscordOAuthClient) -> APIRou
         user = require_admin(request)
         require_csrf(request, csrf_token)
         service.create_schedule(user, item_id, quantity, weekday, time_utc, reason)
-        return RedirectResponse("/production", status_code=status.HTTP_303_SEE_OTHER)
+        return redirect_after_action(request, "/wholesale", "Production hebdomadaire créée.")
 
     @router.post("/production/schedules/{schedule_id}", name="update_schedule")
     async def update_schedule(
@@ -184,7 +187,7 @@ def build_router(service: DashboardService, oauth: DiscordOAuthClient) -> APIRou
             user, schedule_id, quantity=quantity, weekday=weekday,
             time_utc=time_utc, enabled=enabled, reason=reason,
         )
-        return RedirectResponse("/production", status_code=status.HTTP_303_SEE_OTHER)
+        return redirect_after_action(request, "/wholesale", "Production hebdomadaire modifiée.")
 
     @router.post("/production/schedules/{schedule_id}/archive", name="archive_schedule")
     async def archive_schedule(
@@ -194,12 +197,12 @@ def build_router(service: DashboardService, oauth: DiscordOAuthClient) -> APIRou
         user = require_admin(request)
         require_csrf(request, csrf_token)
         service.archive_schedule(user, schedule_id, reason)
-        return RedirectResponse("/production", status_code=status.HTTP_303_SEE_OTHER)
+        return redirect_after_action(request, "/wholesale", "Production hebdomadaire archivée.")
 
     @router.get("/wholesale", name="wholesale")
-    async def wholesale(request: Request):
+    async def wholesale(request: Request, shop_id: str | None = Query(None)):
         current_user(request)
-        return render(request, "wholesale.html", items=service.wholesale_items(), catalog=ITEM_CATALOG.values())
+        return render(request, "wholesale.html", **service.wholesale_data(shop_id))
 
     @router.post("/wholesale", name="update_wholesale")
     async def update_wholesale(
@@ -212,12 +215,12 @@ def build_router(service: DashboardService, oauth: DiscordOAuthClient) -> APIRou
         user = require_admin(request)
         require_csrf(request, csrf_token)
         service.set_wholesale(user, item_id, price, available, minimum_order, maximum_order, reason)
-        return RedirectResponse("/wholesale", status_code=status.HTTP_303_SEE_OTHER)
+        return redirect_after_action(request, "/wholesale", "Catalogue grossiste mis à jour.")
 
     @router.get("/permissions", name="permissions")
     async def permissions(request: Request):
         current_user(request)
-        return render(request, "permissions.html", **service.permissions_matrix())
+        return RedirectResponse("/wholesale", status_code=status.HTTP_303_SEE_OTHER)
 
     @router.post("/permissions", name="update_permission")
     async def update_permission(
@@ -228,16 +231,23 @@ def build_router(service: DashboardService, oauth: DiscordOAuthClient) -> APIRou
         user = require_admin(request)
         require_csrf(request, csrf_token)
         service.set_permission(user, shop_id, item_id, allowed, reason)
-        return RedirectResponse("/permissions", status_code=status.HTTP_303_SEE_OTHER)
+        return redirect_after_action(request, f"/wholesale?shop_id={shop_id}", "Droit d’achat mis à jour.")
+
+    @router.post("/shops/{shop_id}/permissions", name="update_shop_permission")
+    async def update_shop_permission(
+        request: Request, shop_id: str, item_id: Annotated[str, Form()],
+        allowed: Annotated[bool, Form()], reason: Annotated[str, Form(min_length=3, max_length=300)],
+        csrf_token: Annotated[str, Form()],
+    ):
+        user = require_admin(request)
+        require_csrf(request, csrf_token)
+        service.set_permission(user, shop_id, item_id, allowed, reason)
+        return redirect_after_action(request, f"/shops/{shop_id}", "Droit d’achat mis à jour.")
 
     @router.get("/restock", name="restock")
     async def restock(request: Request):
         current_user(request)
-        return render(
-            request, "restock.html", rows=service.restock_rows(),
-            shops=[report.shop for report in service.shop_reports()],
-            items=ITEM_CATALOG.values(),
-        )
+        return RedirectResponse("/wholesale", status_code=status.HTTP_303_SEE_OTHER)
 
     @router.post("/restock", name="update_restock")
     async def update_restock(
@@ -254,12 +264,29 @@ def build_router(service: DashboardService, oauth: DiscordOAuthClient) -> APIRou
             target_stock=target_stock, max_unit_price=max_unit_price,
             max_total_spend=max_total_spend, reason=reason,
         )
-        return RedirectResponse("/restock", status_code=status.HTTP_303_SEE_OTHER)
+        return redirect_after_action(request, f"/wholesale?shop_id={shop_id}", "Politique de restock enregistrée.")
+
+    @router.post("/shops/{shop_id}/restock", name="update_shop_restock")
+    async def update_shop_restock(
+        request: Request, shop_id: str, item_id: Annotated[str, Form()],
+        enabled: Annotated[bool, Form()], threshold: Annotated[int, Form(ge=0)],
+        target_stock: Annotated[int, Form(gt=0)], max_unit_price: Annotated[int, Form(ge=0)],
+        max_total_spend: Annotated[int, Form(ge=0)],
+        reason: Annotated[str, Form(min_length=3, max_length=300)], csrf_token: Annotated[str, Form()],
+    ):
+        user = require_admin(request)
+        require_csrf(request, csrf_token)
+        service.set_restock_policy(
+            user, shop_id, item_id, enabled=enabled, threshold=threshold,
+            target_stock=target_stock, max_unit_price=max_unit_price,
+            max_total_spend=max_total_spend, reason=reason,
+        )
+        return redirect_after_action(request, f"/shops/{shop_id}", "Politique de restock enregistrée.")
 
     @router.get("/licenses", name="licenses")
     async def licenses(request: Request):
         current_user(request)
-        return render(request, "licenses.html", reports=service.shop_reports())
+        return RedirectResponse("/shops", status_code=status.HTTP_303_SEE_OTHER)
 
     @router.post("/licenses/{shop_id}/pay", name="pay_license")
     async def pay_license(
@@ -269,7 +296,7 @@ def build_router(service: DashboardService, oauth: DiscordOAuthClient) -> APIRou
         user = require_admin(request)
         require_csrf(request, csrf_token)
         service.pay_license(user, shop_id, reason)
-        return RedirectResponse("/licenses", status_code=status.HTTP_303_SEE_OTHER)
+        return redirect_after_action(request, f"/shops/{shop_id}", "Licence payée ou renouvelée.")
 
     @router.get("/audit", name="audit")
     async def audit(
@@ -289,7 +316,7 @@ def build_router(service: DashboardService, oauth: DiscordOAuthClient) -> APIRou
     @router.get("/alerts", name="alerts")
     async def alerts(request: Request):
         current_user(request)
-        return render(request, "alerts.html", alerts=service.alerts())
+        return RedirectResponse("/", status_code=status.HTTP_303_SEE_OTHER)
 
     @router.get("/admin", name="admin")
     async def admin(request: Request):

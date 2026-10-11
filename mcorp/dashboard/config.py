@@ -6,6 +6,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 
 class ConfigurationError(RuntimeError):
     pass
@@ -28,6 +30,7 @@ class DashboardSettings:
 
     @classmethod
     def from_env(cls) -> "DashboardSettings":
+        load_dotenv(dotenv_path=Path.cwd() / ".env", override=False)
         required = {
             "discord_client_id": "MCORP_DISCORD_CLIENT_ID",
             "discord_client_secret": "MCORP_DISCORD_CLIENT_SECRET",

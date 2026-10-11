@@ -635,6 +635,29 @@ class LedgerStore:
             ).fetchall()
         return [self._transaction_from_row(row) for row in rows]
 
+    def audit_transactions(
+        self, institution_id: str, limit: int = 200
+    ) -> list[tuple[LedgerTransaction, tuple[str, ...]]]:
+        """Return recent ledger events with their participant identifiers for admin audit."""
+        with self._connection() as connection:
+            rows = connection.execute(
+                """SELECT t.*, GROUP_CONCAT(p.owner_id) AS participant_ids
+                   FROM ledger_transactions AS t
+                   LEFT JOIN transaction_participants AS p
+                     ON p.transaction_id = t.transaction_id
+                   WHERE t.institution_id = ?
+                   GROUP BY t.transaction_id
+                   ORDER BY t.created_at DESC LIMIT ?""",
+                (institution_id, limit),
+            ).fetchall()
+        return [
+            (
+                self._transaction_from_row(row),
+                tuple(filter(None, str(row["participant_ids"] or "").split(","))),
+            )
+            for row in rows
+        ]
+
     def _connection(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.database_path)
         connection.row_factory = sqlite3.Row

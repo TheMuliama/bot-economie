@@ -213,6 +213,15 @@ class InventoryStore:
             ).fetchall()
         return [self._transaction_from_row(row) for row in rows]
 
+    def audit_transactions(self, limit: int = 200) -> list[InventoryTransaction]:
+        """Return recent inventory movements for the read-only administrative audit."""
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM inventory_transactions ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [self._transaction_from_row(row) for row in rows]
+
     def _connection(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.database_path)
         connection.row_factory = sqlite3.Row
