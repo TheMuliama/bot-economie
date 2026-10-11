@@ -43,6 +43,7 @@ from .inventory_service import (
     NonStackableQuantity,
     UnknownItem,
 )
+from .dashboard.identities import DiscordIdentityStore
 from .shops import ShopNotFound, ShopStore
 from .service import (
     BankingOperationError,
@@ -84,6 +85,7 @@ class MCorp(commands.Cog):
         self.inventory = InventoryService(self.inventory_store)
         self.shop_store = ShopStore(self.ledger.database_path)
         self.control = EconomyControlService(self.ledger, self.inventory, self.shop_store)
+        self.identity_store = DiscordIdentityStore(self.ledger.database_path)
 
     async def cog_load(self) -> None:
         # The schema creation is small and happens once at cog load. Keeping it
@@ -91,6 +93,11 @@ class MCorp(commands.Cog):
         self.ledger.initialize()
         self.inventory_store.initialize()
         self.shop_store.initialize()
+        self.identity_store.initialize()
+
+    async def cog_before_invoke(self, ctx: commands.Context) -> None:
+        """Remember active command authors without scanning the Discord guild."""
+        self._remember_member(ctx.author)
 
     @commands.command()
     async def mcorp(self, ctx: commands.Context) -> None:
@@ -171,6 +178,7 @@ class MCorp(commands.Cog):
         quantite: int | None = None,
     ) -> None:
         """Donne du liquide (`100R`) ou un objet (`immunity [quantité]`)."""
+        self._remember_member(membre)
         institution_id, _ = await self._bank_context(ctx)
         cash_amount = self._parse_cash_amount(cible)
         if cash_amount is not None:
@@ -236,6 +244,7 @@ class MCorp(commands.Cog):
         except commands.CommandError:
             await ctx.send("Indiquez un membre valide ou le mot-clé `mcorp`.")
             return
+        self._remember_member(membre)
         if membre.id == vault.id:
             await ctx.send("Utilisez `m!depot` pour alimenter le coffre M Corp.")
             return
@@ -255,6 +264,7 @@ class MCorp(commands.Cog):
     @commands.guild_only()
     async def virement(self, ctx: commands.Context, membre: commands.MemberConverter, montant: int) -> None:
         """Compatibilité : utilisez plutôt m!payer @membre montant."""
+        self._remember_member(membre)
         await ctx.send("`m!virement` est remplacée par `m!payer @membre montant`.")
         institution_id, vault = await self._bank_context(ctx)
         try:
@@ -334,6 +344,7 @@ class MCorp(commands.Cog):
         self, ctx: commands.Context, membre: commands.MemberConverter, montant: int
     ) -> None:
         """[Propriétaire] Crédite le portefeuille Red d'un membre, hors ledger."""
+        self._remember_member(membre)
         institution_id, vault = await self._bank_context(ctx)
         if membre.id == vault.id:
             await ctx.send("Le coffre ne peut pas être crédité administrativement : utilisez `m!depot`.")
@@ -359,6 +370,7 @@ class MCorp(commands.Cog):
         self, ctx: commands.Context, membre: commands.MemberConverter, montant: int
     ) -> None:
         """[Propriétaire] Débite le portefeuille Red d'un membre, hors ledger."""
+        self._remember_member(membre)
         institution_id, vault = await self._bank_context(ctx)
         if membre.id == vault.id:
             await ctx.send("Le coffre ne peut pas être débité administrativement : utilisez `m!retrait`.")
@@ -384,6 +396,7 @@ class MCorp(commands.Cog):
         self, ctx: commands.Context, membre: commands.MemberConverter, montant: int
     ) -> None:
         """[Propriétaire] Verse une prime depuis la trésorerie M Corp."""
+        self._remember_member(membre)
         institution_id, vault = await self._bank_context(ctx)
         if membre.id == vault.id:
             await ctx.send("Le coffre ne peut pas recevoir une prime de trésorerie.")
@@ -496,6 +509,7 @@ class MCorp(commands.Cog):
         self, ctx: commands.Context, membre: commands.MemberConverter, item_id: str, quantite: int = 1
     ) -> None:
         """[Propriétaire] Attribue un objet catalogué à un membre."""
+        self._remember_member(membre)
         try:
             balance = self.inventory.add_item(
                 self._user_owner(membre.id), item_id, quantite, administrator_id=ctx.author.id
@@ -514,6 +528,7 @@ class MCorp(commands.Cog):
         self, ctx: commands.Context, membre: commands.MemberConverter, item_id: str, quantite: int = 1
     ) -> None:
         """[Propriétaire] Retire un objet catalogué à un membre."""
+        self._remember_member(membre)
         try:
             balance = self.inventory.remove_item(
                 self._user_owner(membre.id), item_id, quantite, administrator_id=ctx.author.id
@@ -544,6 +559,7 @@ class MCorp(commands.Cog):
         nom: str,
     ) -> None:
         """[Propriétaire] Crée une boutique de test administrable."""
+        self._remember_member(proprietaire)
         institution_id, _ = await self._bank_context(ctx)
         try:
             shop = self.control.create_shop(
@@ -752,6 +768,7 @@ class MCorp(commands.Cog):
 
     async def _send_inventory(self, ctx: commands.Context, member: Any) -> None:
         """Combine the Red cash display with the distinct inventory source."""
+        self._remember_member(member)
         wallet = await bank.get_balance(member)
         currency = await bank.get_currency_name(ctx.guild)
         entries = self.inventory.get_inventory(self._user_owner(member.id))
@@ -770,6 +787,14 @@ class MCorp(commands.Cog):
             "*(Le liquide reste stocké dans Red Bank.)*\n\n"
             f"**Objets :**\n{objects}"
         )
+
+    def _remember_member(self, member: Any) -> None:
+        """Persist a member name already available to an M Corp command."""
+        discord_id = getattr(member, "id", None)
+        display_name = getattr(member, "display_name", None)
+        if discord_id is None or not isinstance(display_name, str):
+            return
+        self.identity_store.remember_known_nickname(str(discord_id), display_name)
 
     @staticmethod
     def _parse_cash_amount(token: str) -> int | None:

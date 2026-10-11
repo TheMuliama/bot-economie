@@ -48,6 +48,14 @@ class Banking:
         return (200, 400)
 
 
+class Identities:
+    def __init__(self) -> None:
+        self.seen: list[tuple[str, str]] = []
+
+    def remember_known_nickname(self, discord_id: str, nickname: str) -> None:
+        self.seen.append((discord_id, nickname))
+
+
 class MCorpCommandTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.alice = Member(1, "Alice")
@@ -56,6 +64,7 @@ class MCorpCommandTests(unittest.IsolatedAsyncioTestCase):
         self.cog = object.__new__(MCorp)
         self.cog.ledger = Ledger()
         self.cog.banking = Banking()
+        self.cog.identity_store = Identities()
 
         async def bank_context(ctx):  # type: ignore[no-untyped-def]
             return "mcorp:guild:1", Member(999, "M Corp")
@@ -104,6 +113,19 @@ class MCorpCommandTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self.cog.banking.cash_calls[0][-1], 100)
         self.assertIn("100 R", self.ctx.sent[0])
+
+    async def test_active_command_members_are_remembered(self) -> None:
+        async def get_currency_name(guild):  # type: ignore[no-untyped-def]
+            return "R"
+
+        await self.cog.cog_before_invoke(self.ctx)
+        with patch("mcorp.mcorp.bank.get_currency_name", get_currency_name):
+            await MCorp.donner.callback(self.cog, self.ctx, self.bob, "100R", None)
+
+        self.assertEqual(
+            self.cog.identity_store.seen,
+            [("1", "Alice"), ("2", "Bob")],
+        )
 
     def test_cash_token_parser_is_unambiguous(self) -> None:
         self.assertEqual(MCorp._parse_cash_amount("100R"), 100)

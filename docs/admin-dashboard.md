@@ -216,8 +216,11 @@ La Phase 3.6 ajoute sans destruction :
 - `production_schedule_runs`.
 - `discord_identities`.
 
-`discord_identities` mémorise le surnom Discord connu lors d'une connexion
-OAuth. Les colonnes `imposed_nickname`, `previous_nickname` et
+`discord_identities` mémorise progressivement le surnom Discord connu lors
+d'une connexion OAuth ou lorsqu'un `discord.Member` participe à une commande
+M Corp. Cette synchronisation opportuniste couvre les auteurs et les membres
+cibles déjà résolus, sans listener global ni scan de guilde. Les colonnes
+`imposed_nickname`, `previous_nickname` et
 `rename_expires_at` réservent le minimum nécessaire aux futurs bons de
 renommage, sans en implémenter le fonctionnement dans cette V1. En l'absence
 de nom connu, l'interface affiche `Discord <ID>`.
@@ -298,9 +301,9 @@ puis redémarrer Red avant le dashboard.
   `mcorp/__init__.py` importe le cog au chargement du paquet.
 - La section Licence modifie les paramètres via la fiche boutique et déclenche le
   paiement, mais ne propose pas encore d'éditeur HTML du stock inclus.
-- Seuls les utilisateurs qui se sont connectés au dashboard disposent d'un
-  surnom connu stocké ; les autres propriétaires joueurs utilisent le fallback
-  lisible `Discord <ID>`.
+- Un joueur jamais rencontré par une commande M Corp et jamais connecté au
+  dashboard utilise encore le fallback lisible `Discord <ID>` jusqu'à sa
+  première activité connue.
 - Un arrêt brutal après la revendication d'un run et avant sa production peut
   laisser le run `RUNNING` et reporter la production à la semaine suivante.
   La clé unique empêche en priorité une double production.

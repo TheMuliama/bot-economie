@@ -370,6 +370,28 @@ class DashboardWebTests(unittest.TestCase):
             columns,
         )
 
+    def test_known_nickname_update_preserves_future_rename_fields(self) -> None:
+        import sqlite3
+
+        self.service.identities.remember_known_nickname("42", "Lucas")
+        with sqlite3.connect(self.path) as connection:
+            connection.execute(
+                """UPDATE discord_identities SET imposed_nickname = ?, previous_nickname = ?,
+                   rename_expires_at = ? WHERE discord_id = ?""",
+                ("Capitaine", "Lucas", "2030-01-01T00:00:00+00:00", "42"),
+            )
+        self.service.identities.remember_known_nickname("42", "Lucas Actif")
+        with sqlite3.connect(self.path) as connection:
+            row = connection.execute(
+                """SELECT known_nickname, imposed_nickname, previous_nickname, rename_expires_at
+                   FROM discord_identities WHERE discord_id = ?""",
+                ("42",),
+            ).fetchone()
+        self.assertEqual(
+            row,
+            ("Lucas Actif", "Capitaine", "Lucas", "2030-01-01T00:00:00+00:00"),
+        )
+
     def test_audit_unifies_control_ledger_and_inventory(self) -> None:
         self.service.control.ledger.record_cash_event(
             INSTITUTION, "ADMIN_CREDIT", 1, (42,), {"administrator_id": 100}
