@@ -116,13 +116,17 @@ source "$HOME/.venvs/redbot/bin/activate"
 redbot mcorp
 ```
 
-Terminal dashboard, après export des variables :
+Terminal dashboard :
 
 ```bash
-cd /chemin/vers/bot-economie-admin-dashboard
+cd ~/Code/bot-economie
 source "$HOME/.venvs/redbot/bin/activate"
 uvicorn mcorp.dashboard.app:app --host 127.0.0.1 --port 8000
 ```
+
+Un fichier `.env` placé à la racine du dépôt est chargé automatiquement s'il
+existe. Il reste facultatif et ignoré par Git. Une variable déjà exportée dans
+l'environnement garde toujours priorité sur la valeur du `.env`.
 
 Ouvrir ensuite `http://127.0.0.1:8000`. Le healthcheck minimal est disponible
 sur `http://127.0.0.1:8000/health`.
@@ -135,7 +139,8 @@ sur `http://127.0.0.1:8000/health`.
   figure dans `MCORP_MODERATOR_ROLE_IDS`.
 - un membre ordinaire ou extérieur au serveur est refusé.
 - `MODERATOR` dispose d'un accès en lecture aux métriques, boutiques, stocks,
-  grossiste, permissions, restock, licences, audit et alertes.
+  grossiste et audit. Les licences, permissions et politiques de restock sont
+  consultables dans les pages Boutiques et Grossiste.
 - toutes les mutations sont réservées à `ADMIN` dans la V1.
 
 Les contrôles sont répétés côté serveur sur chaque route. La session est
@@ -152,21 +157,20 @@ n'affichent jamais le client secret ni le secret de session.
 | Vue générale | `GET /` | ADMIN, MODERATOR |
 | Boutiques | `GET /shops`, `GET /shops/{shop_id}` | ADMIN, MODERATOR |
 | Stocks | `GET /stocks` | ADMIN, MODERATOR |
-| Production | `GET/POST /production` | ADMIN |
-| Planifications | `POST /production/schedules[...]` | ADMIN |
 | Grossiste | `GET/POST /wholesale` | lecture tous, écriture ADMIN |
-| Permissions | `GET/POST /permissions` | lecture tous, écriture ADMIN |
-| Restock | `GET/POST /restock` | lecture tous, écriture ADMIN |
-| Licences | `GET /licenses`, `POST /licenses/{shop_id}/pay` | lecture tous, écriture ADMIN |
 | Audit | `GET /audit` | ADMIN, MODERATOR |
-| Alertes | `GET /alerts` | ADMIN, MODERATOR |
 | Administration | `GET /admin` | ADMIN |
 | Santé | `GET /health` | public, données minimales |
 
 Les actions boutique supplémentaires utilisent `POST /shops`,
 `POST /shops/{shop_id}/configure` et
-`POST /shops/{shop_id}/suspension`. La déconnexion est un `POST /logout`
-protégé par CSRF.
+`POST /shops/{shop_id}/suspension`. La fiche boutique expose également le
+paiement de licence, les droits d'achat et les politiques de restock. La page
+Grossiste regroupe production manuelle, planifications hebdomadaires,
+catalogue, approvisionnement et historique. Les anciennes URL de lecture
+`/production`, `/permissions`, `/restock`, `/licenses` et `/alerts` redirigent
+vers leur page fusionnée ; les routes POST historiques restent compatibles.
+La déconnexion est un `POST /logout` protégé par CSRF.
 
 ## Réconciliation Red Bank
 
@@ -210,6 +214,13 @@ La Phase 3.6 ajoute sans destruction :
 - `reconciliation_snapshots` ;
 - `production_schedules` ;
 - `production_schedule_runs`.
+- `discord_identities`.
+
+`discord_identities` mémorise le surnom Discord connu lors d'une connexion
+OAuth. Les colonnes `imposed_nickname`, `previous_nickname` et
+`rename_expires_at` réservent le minimum nécessaire aux futurs bons de
+renommage, sans en implémenter le fonctionnement dans cette V1. En l'absence
+de nom connu, l'interface affiche `Discord <ID>`.
 
 Les tables de la Phase 3.5 (`shops`, licences, grossiste, permissions,
 restock, historique et `control_events`) sont également initialisées si la
@@ -229,9 +240,10 @@ V1 doit rester sur un seul worker Uvicorn : ne pas ajouter `--workers`.
 
 Les actions dashboard sensibles ajoutent à `control_events` l'acteur Discord,
 son rôle, l'action, la cible, les anciennes/nouvelles valeurs, l'horodatage et
-la raison. La page Audit filtre les événements de contrôle par acteur,
-utilisateur, boutique, type, date, statut ou identifiant présent dans les
-métadonnées.
+la raison. La page Audit fusionne en lecture seule `control_events`,
+`ledger_transactions` et `inventory_transactions`, puis filtre la vue unifiée
+par acteur, utilisateur, boutique, type, date, statut ou identifiant de
+transaction.
 
 Les alertes calculées couvrent :
 
@@ -272,30 +284,28 @@ puis redémarrer Red avant le dashboard.
 6. Confirmer qu'un membre normal est refusé.
 7. Confirmer qu'un rôle configuré obtient `MODERATOR` et ne peut rien modifier.
 8. Confirmer que le propriétaire obtient `ADMIN`.
-9. Vérifier la vue générale, les boutiques, stocks, licences, audit et alertes.
-10. Produire une petite quantité d'un objet et contrôler le stock et l'audit.
-11. Créer une règle hebdomadaire de test, puis vérifier sa persistance après
+9. Vérifier les six entrées Vue générale, Boutiques, Stocks, Grossiste, Audit
+   et Administration.
+10. Ouvrir une fiche boutique et vérifier licence, stock et approvisionnement.
+11. Produire une petite quantité d'un objet et contrôler le stock et l'audit.
+12. Créer puis modifier/désactiver une règle hebdomadaire et vérifier sa persistance après
     redémarrage.
-12. Exécuter à nouveau `m!bankcheck` et confirmer une différence nulle.
+13. Exécuter à nouveau `m!bankcheck` et confirmer une différence nulle.
 
 ## Limites connues de la V1
 
 - Le dashboard doit actuellement utiliser l'environnement Python de Red, car
   `mcorp/__init__.py` importe le cog au chargement du paquet.
-- La page Production permet la création et l'archivage d'une règle. Le backend
-  prend en charge modification et activation/désactivation, mais ces contrôles
-  ne sont pas encore exposés dans le HTML.
-- La page Licences modifie les paramètres via la fiche boutique et déclenche le
+- La section Licence modifie les paramètres via la fiche boutique et déclenche le
   paiement, mais ne propose pas encore d'éditeur HTML du stock inclus.
-- La page Audit présente les événements de contrôle. Elle ne fusionne pas
-  encore les journaux complets `ledger_transactions` et
-  `inventory_transactions`; les transferts joueurs restent consultables dans
-  leurs journaux natifs.
+- Seuls les utilisateurs qui se sont connectés au dashboard disposent d'un
+  surnom connu stocké ; les autres propriétaires joueurs utilisent le fallback
+  lisible `Discord <ID>`.
 - Un arrêt brutal après la revendication d'un run et avant sa production peut
   laisser le run `RUNNING` et reporter la production à la semaine suivante.
   La clé unique empêche en priorité une double production.
-- Les alertes sont calculées à l'affichage et ne sont pas encore envoyées vers
-  Discord.
+- Les alertes sont calculées sur la Vue générale et ne sont pas encore envoyées
+  vers Discord.
 - Un seul worker Uvicorn est recommandé pour cette V1, même si la revendication
   des occurrences est protégée contre deux workers.
 - HTTPS et le reverse proxy restent à configurer avant toute exposition réseau.
