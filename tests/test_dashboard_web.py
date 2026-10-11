@@ -4,21 +4,24 @@ from __future__ import annotations
 
 import re
 import asyncio
+import os
 import shutil
 import tempfile
 import unittest
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+from unittest.mock import patch
 
 import httpx
 
 from mcorp.dashboard.app import create_app
 from mcorp.dashboard.auth import AccessDenied, DiscordOAuthClient, OAuthIdentity
 from mcorp.dashboard.config import DashboardSettings
+from mcorp.dashboard.identities import DiscordIdentityStore
 from mcorp.dashboard.services import DashboardService
 from mcorp.dashboard.scheduler import ProductionScheduleStore
 from mcorp.control import EconomyControlService
-from mcorp.inventory import InventoryStore
+from mcorp.inventory import InventoryOwner, InventoryStore
 from mcorp.inventory_service import InventoryService
 from mcorp.ledger import LedgerStore
 from mcorp.shops import ShopStore
@@ -56,7 +59,7 @@ class FakeOAuth:
         if code == "outside":
             raise AccessDenied("hors serveur")
         identities = {
-            "owner": OAuthIdentity("100", "Owner", True, frozenset()),
+            "owner": OAuthIdentity("100", "Owner", True, frozenset(), "Propriétaire"),
             "moderator": OAuthIdentity("200", "Moderator", False, frozenset({"555"})),
             "normal": OAuthIdentity("300", "Member", False, frozenset({"777"})),
         }
@@ -180,6 +183,7 @@ class DashboardWebTests(unittest.TestCase):
             }, follow_redirects=False,
         )
         self.assertEqual(response.status_code, 303)
+        self.assertIn("Production enregistrée", self.client.get(response.headers["location"]).text)
         metric = next(item for item in self.service.control.item_metrics() if item.item_id == "immunity")
         self.assertEqual(metric.mcorp_stock, 3)
 
@@ -220,7 +224,23 @@ class DashboardWebTests(unittest.TestCase):
         self.login()
         text = self.client.get("/").text
         self.assertIn("RTC couverts", text)
+        self.assertRegex(text, r"RTC couverts</span><strong>\d+ RTC")
         self.assertIn("Réconciliation Red Bank", text)
+        self.assertIn("Produit par M Corp", text)
+        self.assertIn("objets créés officiellement", text)
+
+    def test_navigation_only_contains_v1_pages(self) -> None:
+        self.login()
+        text = self.client.get("/").text
+        navigation = re.search(r'<nav[^>]*>(.*?)</nav>', text, re.DOTALL)
+        assert navigation is not None
+        labels = re.findall(r'<a[^>]*>([^<]+)</a>', navigation.group(1))
+        self.assertEqual(
+            labels,
+            ["Vue générale", "Boutiques", "Stocks", "Grossiste", "Audit", "Administration"],
+        )
+        for removed in ("Production", "Permissions", "Restock", "Licences", "Alertes"):
+            self.assertNotIn(f">{removed}<", navigation.group(1))
 
     def test_shops_list_page(self) -> None:
         self.login()
@@ -229,32 +249,59 @@ class DashboardWebTests(unittest.TestCase):
     def test_shop_detail_page(self) -> None:
         self.login()
         text = self.client.get("/shops/LUCAS_STORE").text
-        self.assertIn("Compte", text)
-        self.assertIn("Auto-restock", text)
+        for section in ("Informations générales", "Compte / stock", "Licence", "Approvisionnement"):
+            self.assertIn(section, text)
+        self.assertIn("Stock inclus avec la licence", text)
+        self.assertIn('/shops/LUCAS_STORE/permissions', text)
+        self.assertIn('/shops/LUCAS_STORE/restock', text)
+
+    def test_moderator_shop_detail_is_read_only(self) -> None:
+        self.login("moderator")
+        text = self.client.get("/shops/LUCAS_STORE").text
+        self.assertIn("Approvisionnement", text)
+        self.assertNotIn('/shops/LUCAS_STORE/permissions', text)
+        self.assertNotIn('/shops/LUCAS_STORE/restock', text)
 
     def test_stocks_page(self) -> None:
         self.login()
         text = self.client.get("/stocks").text
         self.assertIn("Par objet", text)
         self.assertIn("Par propriétaire", text)
+        self.assertIn("Produit par M Corp", text)
+        self.assertIn("Entrepôt M Corp", text)
+
+    def test_stocks_use_known_discord_nickname(self) -> None:
+        self.service.control.inventory.add_item(
+            InventoryOwner("USER", "42"), "maro", 1, administrator_id=100
+        )
+        self.service.remember_discord_identity("42", "Lucas")
+        self.login()
+        text = self.client.get("/stocks").text
+        self.assertIn("Lucas", text)
+        self.assertNotIn(">42<", text)
 
     def test_wholesale_page(self) -> None:
         self.login("moderator")
-        self.assertEqual(self.client.get("/wholesale").status_code, 200)
+        text = self.client.get("/wholesale").text
+        self.assertIn("Entrepôt M Corp", text)
+        self.assertIn("Catalogue grossiste", text)
+        self.assertIn("Approvisionnement des boutiques", text)
+        self.assertNotIn('action="/production"', text)
 
     def test_permissions_page(self) -> None:
         self.login("moderator")
-        self.assertIn("Permissions d’achat", self.client.get("/permissions").text)
+        response = self.client.get("/permissions", follow_redirects=False)
+        self.assertEqual((response.status_code, response.headers["location"]), (303, "/wholesale"))
 
     def test_licenses_page(self) -> None:
         self.login("moderator")
-        text = self.client.get("/licenses").text
-        self.assertIn("Boutique officielle M Corp", text)
-        self.assertIn("NOT_REQUIRED", text)
+        response = self.client.get("/licenses", follow_redirects=False)
+        self.assertEqual((response.status_code, response.headers["location"]), (303, "/shops"))
 
     def test_restock_page(self) -> None:
         self.login("moderator")
-        self.assertIn("Restock", self.client.get("/restock").text)
+        response = self.client.get("/restock", follow_redirects=False)
+        self.assertEqual((response.status_code, response.headers["location"]), (303, "/wholesale"))
 
     def test_audit_page(self) -> None:
         self.login("moderator")
@@ -262,11 +309,79 @@ class DashboardWebTests(unittest.TestCase):
 
     def test_alerts_page(self) -> None:
         self.login("moderator")
-        self.assertIn("RECONCILIATION_UNKNOWN", self.client.get("/alerts").text)
+        response = self.client.get("/alerts", follow_redirects=False)
+        self.assertEqual((response.status_code, response.headers["location"]), (303, "/"))
+        self.assertIn("RECONCILIATION_UNKNOWN", self.client.get("/").text)
 
     def test_production_page_is_admin_only(self) -> None:
         self.login("moderator")
-        self.assertEqual(self.client.get("/production").status_code, 403)
+        response = self.client.get("/production", follow_redirects=False)
+        self.assertEqual((response.status_code, response.headers["location"]), (303, "/wholesale"))
+        self.assertNotIn('action="/production"', self.client.get("/wholesale").text)
+
+    def test_admin_can_update_and_disable_schedule_from_html(self) -> None:
+        self.login("owner")
+        token = self.csrf()
+        created = self.client.post("/production/schedules", data={
+            "item_id": "maro", "quantity": "2", "weekday": "1", "time_utc": "09:30",
+            "reason": "planning initial", "csrf_token": token,
+        }, follow_redirects=False)
+        self.assertEqual(created.status_code, 303)
+        schedule = self.service.schedules.list(INSTITUTION)[0]
+        page = self.client.get("/wholesale").text
+        self.assertIn(f'/production/schedules/{schedule.schedule_id}', page)
+        updated = self.client.post(f"/production/schedules/{schedule.schedule_id}", data={
+            "quantity": "7", "weekday": "4", "time_utc": "15:45", "enabled": "false",
+            "reason": "ajustement planning", "csrf_token": self.csrf(),
+        }, follow_redirects=False)
+        self.assertEqual(updated.status_code, 303)
+        current = self.service.schedules.get(schedule.schedule_id)
+        assert current is not None
+        self.assertEqual((current.quantity, current.weekday, current.time_utc, current.enabled), (7, 4, "15:45", False))
+
+    def test_shop_supply_actions_remain_admin_only_server_side(self) -> None:
+        self.login("moderator")
+        response = self.client.post("/shops/LUCAS_STORE/permissions", data={
+            "item_id": "maro", "allowed": "true", "reason": "test lecture seule",
+            "csrf_token": self.csrf(),
+        })
+        self.assertEqual(response.status_code, 403)
+
+    def test_oauth_login_remembers_server_nickname(self) -> None:
+        self.login("owner")
+        self.assertEqual(self.service.identities.known_nickname("100"), "Propriétaire")
+
+    def test_identity_migration_is_additive_and_idempotent(self) -> None:
+        import sqlite3
+
+        store = DiscordIdentityStore(self.path)
+        store.initialize()
+        store.initialize()
+        with sqlite3.connect(self.path) as connection:
+            tables = {row[0] for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )}
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(discord_identities)")}
+        self.assertIn("ledger_transactions", tables)
+        self.assertIn("inventory_transactions", tables)
+        self.assertIn("control_events", tables)
+        self.assertEqual(
+            {"discord_id", "known_nickname", "imposed_nickname", "previous_nickname", "rename_expires_at", "updated_at"},
+            columns,
+        )
+
+    def test_audit_unifies_control_ledger_and_inventory(self) -> None:
+        self.service.control.ledger.record_cash_event(
+            INSTITUTION, "ADMIN_CREDIT", 1, (42,), {"administrator_id": 100}
+        )
+        self.service.control.inventory.add_item(
+            InventoryOwner("USER", "42"), "maro", 1, administrator_id=100
+        )
+        self.login("moderator")
+        text = self.client.get("/audit").text
+        self.assertIn("Contrôle", text)
+        self.assertIn("Banque", text)
+        self.assertIn("Objets", text)
 
     def test_admin_page_never_renders_secrets(self) -> None:
         self.login("owner")
@@ -287,6 +402,64 @@ class DashboardWebTests(unittest.TestCase):
         self.assertNotIn("UPDATE ", normalized)
         self.assertNotIn("DELETE FROM", normalized)
         self.assertNotIn("SQLITE", normalized)
+
+
+class DashboardEnvironmentTests(unittest.TestCase):
+    def test_dotenv_is_loaded_without_being_required(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            (path / ".env").write_text(
+                "MCORP_DISCORD_CLIENT_ID=dotenv-client\n"
+                "MCORP_DISCORD_CLIENT_SECRET=dotenv-secret\n"
+                "MCORP_DISCORD_REDIRECT_URI=http://localhost/callback\n"
+                "MCORP_DISCORD_GUILD_ID=dotenv-guild\n"
+                "MCORP_SESSION_SECRET=abcdefghijklmnopqrstuvwxyz123456\n"
+                f"MCORP_DATABASE_PATH={path / 'test.sqlite3'}\n",
+                encoding="utf-8",
+            )
+            previous_cwd = Path.cwd()
+            try:
+                os.chdir(path)
+                with patch.dict(os.environ, {}, clear=True):
+                    settings = DashboardSettings.from_env()
+                    ledger = LedgerStore(settings.database_path)
+                    ledger.initialize()
+                    ledger.ensure_institution(settings.institution_id, "M Corp", 999)
+                    ledger.mark_initialized(settings.institution_id, 999, 0)
+                    application = create_app(settings)
+                    client = ASGIClient(application)
+                    try:
+                        health = client.get("/health")
+                    finally:
+                        client.close()
+            finally:
+                os.chdir(previous_cwd)
+        self.assertEqual(settings.discord_client_id, "dotenv-client")
+        self.assertEqual(health.json()["status"], "ok")
+
+    def test_exported_environment_has_priority_over_dotenv(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            (path / ".env").write_text(
+                "MCORP_DISCORD_CLIENT_ID=dotenv-client\n",
+                encoding="utf-8",
+            )
+            exported = {
+                "MCORP_DISCORD_CLIENT_ID": "exported-client",
+                "MCORP_DISCORD_CLIENT_SECRET": "exported-secret",
+                "MCORP_DISCORD_REDIRECT_URI": "http://localhost/callback",
+                "MCORP_DISCORD_GUILD_ID": "guild",
+                "MCORP_SESSION_SECRET": "abcdefghijklmnopqrstuvwxyz123456",
+                "MCORP_DATABASE_PATH": str(path / "test.sqlite3"),
+            }
+            previous_cwd = Path.cwd()
+            try:
+                os.chdir(path)
+                with patch.dict(os.environ, exported, clear=True):
+                    settings = DashboardSettings.from_env()
+            finally:
+                os.chdir(previous_cwd)
+        self.assertEqual(settings.discord_client_id, "exported-client")
 
 
 if __name__ == "__main__":
