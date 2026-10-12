@@ -11,9 +11,8 @@ passifs couverts par ce coffre : un crédit bancaire doit toujours correspondre
 
 Le ledger et son journal sont stockés dans `ledger.sqlite3`, sous le répertoire
 de données de Red pour le cog (`cog_data_path(MCorp)`). SQLite a été retenu
-pour ses transactions locales et ses requêtes d'historique. Le fichier
-historique `mcorp.db` du dépôt est un prototype d'inventaire : il n'est ni lu,
-ni modifié, ni supprimé par ce cog.
+pour ses transactions locales et ses requêtes d'historique. L'ancienne base
+standalone `mcorp.db` a été archivée avant son retrait du dépôt de travail.
 
 Chaque institution possède des comptes typés (`owner_id`, `owner_type`,
 `institution_id`, `account_type`, `balance`, `status`, `is_cash_backed`) et un
@@ -108,8 +107,8 @@ Les quantités sont strictement positives à l'entrée et protégées par
 `CHECK (quantity >= 0)` en base. Un objet non transférable est refusé ; un
 objet non empilable ne peut exister qu'en un exemplaire par inventaire. Les
 migrations sont additives via `CREATE TABLE IF NOT EXISTS` : les données du
-ledger existant sont préservées. Le prototype historique `bot.py`,
-`database.py` et `mcorp.db` n'est ni lu, ni modifié, ni migré.
+ledger existant sont préservées. L'ancien bot standalone et sa base prototype
+ont été archivés puis retirés pendant le nettoyage architectural de la V1.
 
 ## Control plane économique — Phase 3.5
 

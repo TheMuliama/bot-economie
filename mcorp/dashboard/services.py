@@ -173,17 +173,6 @@ class DashboardService:
             ][:20],
         }
 
-    def permissions_matrix(self) -> dict[str, Any]:
-        values = {
-            (row["item_id"], row["shop_id"]): bool(row["can_purchase"])
-            for row in self.control.item_permissions(self.institution_id)
-        }
-        return {
-            "shops": [report.shop for report in self.shop_reports()],
-            "items": tuple(ITEM_CATALOG.values()),
-            "values": values,
-        }
-
     def audit(self, **filters: Any) -> list[UnifiedAuditEvent]:
         """Merge existing control, ledger and inventory journals for read-only display."""
         events = [
