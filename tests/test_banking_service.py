@@ -14,7 +14,7 @@ from mcorp.ledger import (
     SameAccountTransfer,
 )
 from mcorp.owners import SYSTEM_OWNER_TYPE
-from mcorp.service import (
+from mcorp.banking_service import (
     AlreadyInitialized,
     BankingOperationError,
     BankingService,

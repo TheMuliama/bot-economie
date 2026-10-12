@@ -41,7 +41,7 @@ from .inventory_service import (
 )
 from .shops import ShopNotFound
 from .owners import USER_OWNER_TYPE, InventoryOwner
-from .service import (
+from .banking_service import (
     BankingOperationError,
     BankingService,
     AlreadyInitialized,
@@ -52,22 +52,7 @@ from .service import (
     InsufficientCash,
     RecoveryRequired,
 )
-
-
-class RedBankGateway:
-    """Thin adapter around Red's public Bank API."""
-
-    async def get_balance(self, member: Any) -> int:
-        return await bank.get_balance(member)
-
-    async def withdraw(self, member: Any, amount: int) -> int:
-        return await bank.withdraw_credits(member, amount)
-
-    async def deposit(self, member: Any, amount: int) -> int:
-        return await bank.deposit_credits(member, amount)
-
-    async def set_balance(self, member: Any, amount: int) -> int:
-        return await bank.set_balance(member, amount)
+from .red_bank import RedBankGateway
 
 
 class MCorp(commands.Cog):
