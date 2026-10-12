@@ -61,11 +61,8 @@ class MCorp(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         core = build_core_services(cog_data_path(self) / "ledger.sqlite3")
-        self.ledger = core.ledger
-        self.banking = BankingService(self.ledger, RedBankGateway())
-        self.inventory_store = core.inventory_store
+        self.banking = BankingService(core.ledger, RedBankGateway())
         self.inventory = core.inventory
-        self.shop_store = core.shop_store
         self.control = core.control
         self.identity_store = core.identities
 
@@ -102,7 +99,7 @@ class MCorp(commands.Cog):
         """Render the user-facing view without exposing storage implementation."""
         institution_id, vault = await self._bank_context(ctx)
         wallet = await bank.get_balance(ctx.author)
-        account = self.ledger.get_user_balance(institution_id, ctx.author.id)
+        account = self.banking.account_balance(institution_id, ctx.author.id)
         currency = await bank.get_currency_name(ctx.guild)
         await ctx.send(
             f"**💰 Argent de {ctx.author.display_name}**\n"
@@ -301,7 +298,7 @@ class MCorp(commands.Cog):
     async def transactions(self, ctx: commands.Context) -> None:
         """Affiche vos dix dernières opérations M Corp."""
         institution_id, _ = await self._bank_context(ctx)
-        entries = self.ledger.recent_banking_transactions(institution_id, ctx.author.id)
+        entries = self.banking.recent_transactions(institution_id, ctx.author.id)
         if not entries:
             await ctx.send("Aucune transaction M Corp pour le moment.")
             return
@@ -721,7 +718,7 @@ class MCorp(commands.Cog):
         else:
             institution_id = f"mcorp:guild:{ctx.guild.id}"
             institution_name = f"M Corp — {ctx.guild.name}"
-        self.ledger.ensure_institution(institution_id, institution_name, vault.id)
+        self.banking.ensure_institution(institution_id, institution_name, vault.id)
         self.control.ensure_official_shop(institution_id)
         return institution_id, vault
 

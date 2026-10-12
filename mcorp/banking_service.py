@@ -6,7 +6,14 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from .ledger import EconomyStats, InsufficientLedgerFunds, InvalidAmount, LedgerStore, SameAccountTransfer
+from .ledger import (
+    EconomyStats,
+    InsufficientLedgerFunds,
+    InvalidAmount,
+    LedgerStore,
+    LedgerTransaction,
+    SameAccountTransfer,
+)
 
 
 class BankGateway(Protocol):
@@ -92,6 +99,20 @@ class BankingService:
         self.ledger = ledger
         self.bank = bank
         self._operation_lock = asyncio.Lock()
+
+    def ensure_institution(
+        self, institution_id: str, display_name: str, vault_owner_id: int
+    ) -> None:
+        """Ensure the ledger scope used by the banking interface exists."""
+        self.ledger.ensure_institution(institution_id, display_name, vault_owner_id)
+
+    def account_balance(self, institution_id: str, user_id: int) -> int:
+        return self.ledger.get_user_balance(institution_id, user_id)
+
+    def recent_transactions(
+        self, institution_id: str, user_id: int, limit: int = 10
+    ) -> list[LedgerTransaction]:
+        return self.ledger.recent_banking_transactions(institution_id, user_id, limit)
 
     async def deposit(
         self, institution_id: str, player: Any, vault: Any, amount: int

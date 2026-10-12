@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from mcorp.mcorp import MCorp
@@ -25,16 +26,20 @@ class Context:
         self.sent.append(message)
 
 
-class Ledger:
-    def get_user_balance(self, institution_id: str, user_id: int) -> int:
-        return 300
-
-
 class Banking:
     def __init__(self) -> None:
         self.cash_calls: list[tuple[object, object, object, int]] = []
         self.treasury_calls: list[tuple[object, object, object, int]] = []
         self.transfer_calls: list[tuple[object, object, object, object, int]] = []
+        self.transactions: list[object] = []
+
+    def account_balance(self, institution_id: str, user_id: int) -> int:
+        return 300
+
+    def recent_transactions(
+        self, institution_id: str, user_id: int, limit: int = 10
+    ) -> list[object]:
+        return self.transactions[:limit]
 
     async def cash_transfer(self, *args):  # type: ignore[no-untyped-def]
         self.cash_calls.append(args)
@@ -62,7 +67,6 @@ class MCorpCommandTests(unittest.IsolatedAsyncioTestCase):
         self.bob = Member(2, "Bob")
         self.ctx = Context(self.alice)
         self.cog = object.__new__(MCorp)
-        self.cog.ledger = Ledger()
         self.cog.banking = Banking()
         self.cog.identity_store = Identities()
 
@@ -147,3 +151,12 @@ class MCorpCommandTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("remplacée par `m!argent`", self.ctx.sent[0])
         self.assertIn("Sur vous : 800 R", self.ctx.sent[1])
+
+    async def test_transactions_uses_public_banking_query(self) -> None:
+        self.cog.banking.transactions = [
+            SimpleNamespace(transaction_type="DEPOSIT", amount=50, status="COMPLETED")
+        ]
+
+        await MCorp.transactions.callback(self.cog, self.ctx)
+
+        self.assertIn("`DEPOSIT` — 50 crédits — COMPLETED", self.ctx.sent[0])

@@ -88,6 +88,12 @@ existent ? ». Il définit aujourd'hui `ticket_silence`, `immunity`, `maro` et
 `rename`, avec `display_name`, description, transférabilité, empilabilité et
 consommabilité. Aucun effet gameplay n'est implémenté.
 
+Les objets ordinaires et fongibles restent génériques dans ce catalogue. Un
+module ou handler dédié ne sera justifié que par un comportement réellement
+spécifique, pas par la seule rareté de l'objet. Des instances persistantes
+(numéro de série, durabilité, état ou expiration propres) restent un point
+d'extension futur et ne font pas partie de la V1.
+
 L'inventaire répond séparément à « qui possède combien ? ». Chaque ligne est
 identifiée par `(owner_type, owner_id, item_id)`. Les types utilisés sont
 `USER`, `SYSTEM` et `SHOP`; le schéma accepte de futurs types tels que
