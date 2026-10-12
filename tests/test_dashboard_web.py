@@ -25,7 +25,7 @@ from mcorp.inventory_store import InventoryStore
 from mcorp.inventory_service import InventoryService
 from mcorp.ledger import LedgerStore
 from mcorp.owners import InventoryOwner
-from mcorp.shops import ShopStore
+from mcorp.shop_store import ShopStore
 
 
 INSTITUTION = "mcorp:guild:1"

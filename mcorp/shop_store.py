@@ -229,6 +229,9 @@ class ShopStore:
         owner_type: str,
         owner_id: str,
         *,
+        status: str,
+        license_status: str,
+        next_license_due_at: str | None,
         license_required: bool = True,
         license_fee: int = 0,
         license_period_days: int = 7,
@@ -241,8 +244,6 @@ class ShopStore:
         actor_id: str | None = None,
     ) -> Shop:
         created_at = utc_now().isoformat()
-        status = SHOP_LICENSE_EXPIRED if license_required else SHOP_ACTIVE
-        license_status = LICENSE_EXPIRED if license_required else LICENSE_NOT_REQUIRED
         with self._connection() as connection:
             connection.execute(
                 """INSERT INTO shops (
@@ -250,10 +251,11 @@ class ShopStore:
                     license_required, license_fee, license_period_days, license_status,
                     next_license_due_at, commission_bps, payment_methods_json,
                     auto_restock_allowed, public_visibility, restock_fee_bps, access_policy_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)""",
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     institution_id, shop_id, display_name, owner_type, owner_id, status, created_at,
                     int(license_required), license_fee, license_period_days, license_status,
+                    next_license_due_at,
                     commission_bps, json.dumps(payment_methods), int(auto_restock_allowed),
                     visibility, restock_fee_bps, json.dumps(access_policy or {}, sort_keys=True),
                 ),
@@ -286,20 +288,8 @@ class ShopStore:
         license_required: bool, license_fee: int, license_period_days: int,
         commission_bps: int, payment_methods: tuple[str, ...],
         auto_restock_allowed: bool, visibility: str, restock_fee_bps: int,
+        license_status: str, status: str, next_license_due_at: str | None,
     ) -> Shop:
-        current = self.get_shop(institution_id, shop_id)
-        if current is None:
-            raise ShopNotFound(shop_id)
-        if license_required:
-            license_status = current.license_status if current.license_required else LICENSE_EXPIRED
-            status = current.status if current.status == SHOP_SUSPENDED else (
-                SHOP_ACTIVE if license_status == LICENSE_ACTIVE else SHOP_LICENSE_EXPIRED
-            )
-            next_due_at = current.next_license_due_at if current.license_required else None
-        else:
-            license_status = LICENSE_NOT_REQUIRED
-            status = current.status if current.status == SHOP_SUSPENDED else SHOP_ACTIVE
-            next_due_at = None
         with self._connection() as connection:
             cursor = connection.execute(
                 """UPDATE shops SET display_name = ?, license_required = ?, license_fee = ?,
@@ -310,11 +300,12 @@ class ShopStore:
                 (
                     display_name, int(license_required), license_fee, license_period_days,
                     commission_bps, json.dumps(payment_methods), int(auto_restock_allowed),
-                    visibility, restock_fee_bps, license_status, status, next_due_at,
+                    visibility, restock_fee_bps, license_status, status, next_license_due_at,
                     institution_id, shop_id,
                 ),
             )
-            assert cursor.rowcount == 1
+            if cursor.rowcount != 1:
+                raise ShopNotFound(shop_id)
         shop = self.get_shop(institution_id, shop_id)
         assert shop is not None
         return shop

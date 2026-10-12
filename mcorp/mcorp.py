@@ -39,7 +39,7 @@ from .inventory_service import (
     NonStackableQuantity,
     UnknownItem,
 )
-from .shops import ShopNotFound
+from .shop_store import ShopNotFound
 from .owners import USER_OWNER_TYPE, InventoryOwner
 from .banking_service import (
     BankingOperationError,

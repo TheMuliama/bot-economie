@@ -10,7 +10,7 @@ from .identities import DiscordIdentityStore
 from .inventory_store import InventoryStore
 from .inventory_service import InventoryService
 from .ledger import LedgerStore
-from .shops import ShopStore
+from .shop_store import ShopStore
 
 
 @dataclass(frozen=True)

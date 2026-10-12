@@ -121,7 +121,7 @@ La répartition des rôles est désormais explicite :
 - le **joueur** reste le futur consommateur. Aucun parcours `m!boutique` ou
   `m!acheter` n'est encore exposé.
 
-Le module `mcorp/shops.py` ajoute, dans le même `ledger.sqlite3`, des tables
+Le module `mcorp/shop_store.py` ajoute, dans le même `ledger.sqlite3`, des tables
 additives pour les boutiques, stocks inclus dans les licences, prix grossistes
 et leur historique, permissions par objet, politiques de restock et événements
 de contrôle. `mcorp/control.py` fournit `EconomyControlService`, façade métier
@@ -157,6 +157,10 @@ maximal de période et dépense courante. Le devis calcule :
 ```text
 coût du stock + frais de restock = coût total boutique
 ```
+
+Dans la V1, `spent_in_period` est un compteur cumulatif : aucun calendrier ni
+reset de période n'est encore défini. La Phase 3.7 conserve ce comportement ;
+définir la période et sa remise à zéro reste une décision fonctionnelle future.
 
 Le moteur vérifie statut/licence, activation, seuil, permission, disponibilité,
 limites, prix maximal, budget, compte boutique et stock M Corp. L'argent est

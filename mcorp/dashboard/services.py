@@ -9,7 +9,7 @@ from typing import Any
 from ..bootstrap import build_core_services
 from ..catalog import ITEM_CATALOG
 from ..control import ControlError, EconomyControlService
-from ..shops import LICENSE_EXPIRED, SHOP_ACTIVE
+from ..shop_store import LICENSE_EXPIRED, SHOP_ACTIVE
 from .permissions import DashboardUser
 from ..identities import DiscordIdentityStore
 from .scheduler import ProductionScheduleStore
@@ -185,7 +185,7 @@ class DashboardService:
             )
             for event in self.control.audit_events(self.institution_id, limit=500)
         ]
-        for transaction, participants in self.control.ledger.audit_transactions(
+        for transaction, participants in self.control.ledger_audit_transactions(
             self.institution_id, limit=500
         ):
             actor = transaction.metadata.get("administrator_id") or transaction.metadata.get("initiator_id")

@@ -9,10 +9,11 @@ from typing import Any
 from .catalog import get_item
 from .inventory_store import InventoryTransaction
 from .inventory_service import InventoryService, UnknownItem
-from .ledger import LedgerStore
+from .ledger import LedgerStore, LedgerTransaction
 from .owners import SHOP_OWNER_TYPE, SYSTEM_OWNER_TYPE, USER_OWNER_TYPE, InventoryOwner
-from .shops import (
+from .shop_store import (
     LICENSE_ACTIVE,
+    LICENSE_NOT_REQUIRED,
     M_CORP_STORE_ID,
     SHOP_ACTIVE,
     SHOP_LICENSE_EXPIRED,
@@ -96,6 +97,9 @@ class EconomyControlService:
                 "Boutique officielle M Corp",
                 SYSTEM_OWNER_TYPE,
                 M_CORP_OWNER_ID,
+                status=SHOP_ACTIVE,
+                license_status=LICENSE_NOT_REQUIRED,
+                next_license_due_at=None,
                 license_required=False,
                 license_fee=0,
                 commission_bps=0,
@@ -138,6 +142,9 @@ class EconomyControlService:
         self.ledger.get_or_create_shop_account(institution_id, shop_id)
         return self.shops.create_shop(
             institution_id, shop_id, display_name, owner_type, owner_id,
+            status=SHOP_LICENSE_EXPIRED if license_required else SHOP_ACTIVE,
+            license_status=LICENSE_EXPIRED if license_required else LICENSE_NOT_REQUIRED,
+            next_license_due_at=None,
             license_required=license_required, license_fee=license_fee,
             license_period_days=license_period_days, commission_bps=commission_bps,
             payment_methods=payment_methods, auto_restock_allowed=auto_restock_allowed,
@@ -461,6 +468,11 @@ class EconomyControlService:
     def inventory_audit_transactions(self, limit: int = 200) -> list[InventoryTransaction]:
         return self.inventory.audit_transactions(limit)
 
+    def ledger_audit_transactions(
+        self, institution_id: str, limit: int = 200,
+    ) -> list[tuple[LedgerTransaction, tuple[str, ...]]]:
+        return self.ledger.audit_transactions(institution_id, limit)
+
     def audit_events(
         self, institution_id: str, *, actor_id: str | None = None,
         shop_id: str | None = None, event_type: str | None = None,
@@ -489,12 +501,26 @@ class EconomyControlService:
             raise InvalidControlValue("shop")
         if not payment_methods or not set(payment_methods) <= {"BANK", "CASH"}:
             raise InvalidControlValue("payment_methods")
+        if license_required:
+            license_status = current.license_status if current.license_required else LICENSE_EXPIRED
+            status = current.status if current.status == SHOP_SUSPENDED else (
+                SHOP_ACTIVE if license_status == LICENSE_ACTIVE else SHOP_LICENSE_EXPIRED
+            )
+            next_license_due_at = (
+                current.next_license_due_at if current.license_required else None
+            )
+        else:
+            license_status = LICENSE_NOT_REQUIRED
+            status = current.status if current.status == SHOP_SUSPENDED else SHOP_ACTIVE
+            next_license_due_at = None
         updated = self.shops.update_shop(
             institution_id, shop_id, display_name=display_name.strip(),
             license_required=license_required, license_fee=license_fee,
             license_period_days=license_period_days, commission_bps=commission_bps,
             payment_methods=payment_methods, auto_restock_allowed=auto_restock_allowed,
             visibility=visibility, restock_fee_bps=restock_fee_bps,
+            license_status=license_status, status=status,
+            next_license_due_at=next_license_due_at,
         )
         self.record_admin_action(
             institution_id, "SHOP_CONFIGURED", str(administrator_id), "ADMIN",

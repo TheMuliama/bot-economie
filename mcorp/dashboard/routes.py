@@ -9,7 +9,6 @@ from typing import Annotated
 from fastapi import APIRouter, Form, HTTPException, Query, Request, status
 from fastapi.responses import RedirectResponse
 
-from ..catalog import ITEM_CATALOG
 from .auth import AccessDenied, DiscordOAuthClient, OAuthError
 from .permissions import current_user, require_admin, require_csrf
 from .services import DashboardService

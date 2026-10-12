@@ -24,7 +24,7 @@ from mcorp.inventory_store import InventoryStore
 from mcorp.inventory_service import InventoryService
 from mcorp.ledger import LedgerStore
 from mcorp.owners import SHOP_OWNER_TYPE, SYSTEM_OWNER_TYPE, InventoryOwner
-from mcorp.shops import (
+from mcorp.shop_store import (
     LICENSE_EXPIRED,
     LICENSE_NOT_REQUIRED,
     M_CORP_STORE_ID,
