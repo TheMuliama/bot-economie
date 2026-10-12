@@ -13,7 +13,7 @@ from ..inventory_service import InventoryService
 from ..ledger import LedgerStore
 from ..shops import LICENSE_EXPIRED, SHOP_ACTIVE, ShopStore
 from .permissions import DashboardUser
-from .identities import DiscordIdentityStore
+from ..identities import DiscordIdentityStore
 from .scheduler import ProductionScheduleStore
 
 

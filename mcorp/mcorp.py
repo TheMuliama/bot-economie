@@ -43,7 +43,7 @@ from .inventory_service import (
     NonStackableQuantity,
     UnknownItem,
 )
-from .dashboard.identities import DiscordIdentityStore
+from .identities import DiscordIdentityStore
 from .shops import ShopNotFound, ShopStore
 from .service import (
     BankingOperationError,

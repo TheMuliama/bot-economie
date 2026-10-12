@@ -17,7 +17,7 @@ import httpx
 from mcorp.dashboard.app import create_app
 from mcorp.dashboard.auth import AccessDenied, DiscordOAuthClient, OAuthIdentity
 from mcorp.dashboard.config import DashboardSettings
-from mcorp.dashboard.identities import DiscordIdentityStore
+from mcorp.identities import DiscordIdentityStore
 from mcorp.dashboard.services import DashboardService
 from mcorp.dashboard.scheduler import ProductionScheduleStore
 from mcorp.control import EconomyControlService
