@@ -7,13 +7,13 @@ import unittest
 from pathlib import Path
 
 from mcorp.ledger import (
-    SYSTEM_OWNER_TYPE,
     TREASURY_ACCOUNT_TYPE,
     InsufficientLedgerFunds,
     InvalidAmount,
     LedgerStore,
     SameAccountTransfer,
 )
+from mcorp.owners import SYSTEM_OWNER_TYPE
 from mcorp.service import (
     AlreadyInitialized,
     BankingOperationError,

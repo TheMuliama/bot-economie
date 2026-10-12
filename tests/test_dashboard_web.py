@@ -21,9 +21,10 @@ from mcorp.identities import DiscordIdentityStore
 from mcorp.dashboard.services import DashboardService
 from mcorp.dashboard.scheduler import ProductionScheduleStore
 from mcorp.control import EconomyControlService
-from mcorp.inventory import InventoryOwner, InventoryStore
+from mcorp.inventory_store import InventoryStore
 from mcorp.inventory_service import InventoryService
 from mcorp.ledger import LedgerStore
+from mcorp.owners import InventoryOwner
 from mcorp.shops import ShopStore
 
 

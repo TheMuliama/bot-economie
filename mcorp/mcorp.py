@@ -28,13 +28,11 @@ from .control import (
     WholesaleOrderLimit,
     WholesaleUnavailable,
 )
-from .inventory import (
+from .inventory_store import (
     InsufficientInventory,
     InvalidItemQuantity,
     InventoryCapacityExceeded,
-    InventoryOwner,
     SameInventoryOwner,
-    USER_OWNER_TYPE,
 )
 from .inventory_service import (
     ItemNotTransferable,
@@ -42,6 +40,7 @@ from .inventory_service import (
     UnknownItem,
 )
 from .shops import ShopNotFound
+from .owners import USER_OWNER_TYPE, InventoryOwner
 from .service import (
     BankingOperationError,
     BankingService,

@@ -14,14 +14,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Iterable
 
+from .owners import SHOP_OWNER_TYPE, SYSTEM_OWNER_TYPE, USER_OWNER_TYPE
 from .sqlite import open_database
 
 
 DEFAULT_INSTITUTION_ID = "mcorp"
-USER_OWNER_TYPE = "USER"
-SHOP_OWNER_TYPE = "SHOP"
 CHECKING_ACCOUNT_TYPE = "CHECKING"
-SYSTEM_OWNER_TYPE = "SYSTEM"
 TREASURY_ACCOUNT_TYPE = "TREASURY"
 TREASURY_OWNER_ID = "M_CORP_TREASURY"
 ACTIVE_ACCOUNT_STATUS = "ACTIVE"

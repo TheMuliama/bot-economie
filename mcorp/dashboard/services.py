@@ -197,7 +197,7 @@ class DashboardService:
                 {**transaction.metadata, "amount": transaction.amount, "participants": participants},
                 "Banque", transaction.transaction_id, participants,
             ))
-        for transaction in self.control.inventory.store.audit_transactions(limit=500):
+        for transaction in self.control.inventory_audit_transactions(limit=500):
             actor = transaction.metadata.get("administrator_id") or transaction.metadata.get("initiator_id")
             owners = tuple(
                 owner.owner_id for owner in (transaction.source_owner, transaction.destination_owner)

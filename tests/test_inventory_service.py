@@ -6,14 +6,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from mcorp.inventory import (
-    SHOP_OWNER_TYPE,
-    SYSTEM_OWNER_TYPE,
-    USER_OWNER_TYPE,
+from mcorp.inventory_store import (
     InsufficientInventory,
     InvalidItemQuantity,
     InventoryCapacityExceeded,
-    InventoryOwner,
     InventoryStore,
 )
 from mcorp.inventory_service import (
@@ -21,6 +17,12 @@ from mcorp.inventory_service import (
     ItemNotTransferable,
     NonStackableQuantity,
     UnknownItem,
+)
+from mcorp.owners import (
+    SHOP_OWNER_TYPE,
+    SYSTEM_OWNER_TYPE,
+    USER_OWNER_TYPE,
+    InventoryOwner,
 )
 
 

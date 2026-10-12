@@ -3,7 +3,13 @@
 from __future__ import annotations
 
 from .catalog import ItemDefinition, get_item
-from .inventory import InventoryEntry, InventoryOwner, InventoryStore, InvalidItemQuantity
+from .inventory_store import (
+    InventoryEntry,
+    InventoryStore,
+    InventoryTransaction,
+    InvalidItemQuantity,
+)
+from .owners import InventoryOwner
 
 
 class UnknownItem(Exception):
@@ -29,6 +35,18 @@ class InventoryService:
 
     def get_quantity(self, owner: InventoryOwner, item_id: str) -> int:
         return self.store.get_quantity(owner, self._item(item_id).item_id)
+
+    def totals_by_item_and_owner_type(self) -> dict[str, dict[str, int]]:
+        return self.store.totals_by_item_and_owner_type()
+
+    def production_totals(self) -> dict[str, int]:
+        return self.store.production_totals()
+
+    def inventory_distribution(self) -> list[InventoryEntry]:
+        return self.store.inventory_distribution()
+
+    def audit_transactions(self, limit: int = 200) -> list[InventoryTransaction]:
+        return self.store.audit_transactions(limit)
 
     def add_item(self, owner: InventoryOwner, item_id: str, quantity: int, *, administrator_id: int) -> int:
         item = self._item(item_id)

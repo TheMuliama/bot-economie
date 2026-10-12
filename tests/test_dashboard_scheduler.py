@@ -15,9 +15,10 @@ from mcorp.dashboard.scheduler import (
     WeeklyProductionScheduler,
     next_weekly_occurrence,
 )
-from mcorp.inventory import SYSTEM_OWNER_TYPE, InventoryOwner, InventoryStore
+from mcorp.inventory_store import InventoryStore
 from mcorp.inventory_service import InventoryService
 from mcorp.ledger import LedgerStore
+from mcorp.owners import SYSTEM_OWNER_TYPE, InventoryOwner
 from mcorp.shops import ShopStore
 
 

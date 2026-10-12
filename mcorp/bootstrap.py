@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .control import EconomyControlService
 from .identities import DiscordIdentityStore
-from .inventory import InventoryStore
+from .inventory_store import InventoryStore
 from .inventory_service import InventoryService
 from .ledger import LedgerStore
 from .shops import ShopStore

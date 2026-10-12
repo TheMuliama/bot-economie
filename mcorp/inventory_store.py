@@ -10,26 +10,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .owners import InventoryOwner
 from .sqlite import open_database
-
-
-USER_OWNER_TYPE = "USER"
-SYSTEM_OWNER_TYPE = "SYSTEM"
-SHOP_OWNER_TYPE = "SHOP"
-
 
 def _utc_now() -> str:
     return datetime.now(UTC).isoformat()
-
-
-@dataclass(frozen=True)
-class InventoryOwner:
-    owner_type: str
-    owner_id: str
-
-    def __post_init__(self) -> None:
-        if not self.owner_type or not self.owner_type.isupper() or not self.owner_id:
-            raise ValueError("Inventory owners require an uppercase type and a non-empty id.")
 
 
 @dataclass(frozen=True)

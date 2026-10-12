@@ -7,14 +7,10 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from .catalog import get_item
-from .inventory import (
-    SHOP_OWNER_TYPE,
-    SYSTEM_OWNER_TYPE,
-    USER_OWNER_TYPE,
-    InventoryOwner,
-)
+from .inventory_store import InventoryTransaction
 from .inventory_service import InventoryService, UnknownItem
 from .ledger import LedgerStore
+from .owners import SHOP_OWNER_TYPE, SYSTEM_OWNER_TYPE, USER_OWNER_TYPE, InventoryOwner
 from .shops import (
     LICENSE_ACTIVE,
     M_CORP_STORE_ID,
@@ -414,14 +410,14 @@ class EconomyControlService:
         )
 
     def item_metrics(self) -> list[ItemMetrics]:
-        current = self.inventory.store.totals_by_item_and_owner_type()
-        produced = self.inventory.store.production_totals()
+        current = self.inventory.totals_by_item_and_owner_type()
+        produced = self.inventory.production_totals()
         item_ids = sorted(set(current) | set(produced))
         warehouse = self._mcorp_inventory()
         return [
             ItemMetrics(
                 item_id, produced.get(item_id, 0),
-                self.inventory.store.get_quantity(warehouse, item_id),
+                self.inventory.get_quantity(warehouse, item_id),
                 current.get(item_id, {}).get(SHOP_OWNER_TYPE, 0),
                 current.get(item_id, {}).get(USER_OWNER_TYPE, 0),
             )
@@ -460,7 +456,10 @@ class EconomyControlService:
         return self.shops.license_stock_rules(institution_id, shop_id)
 
     def inventory_distribution(self):
-        return self.inventory.store.inventory_distribution()
+        return self.inventory.inventory_distribution()
+
+    def inventory_audit_transactions(self, limit: int = 200) -> list[InventoryTransaction]:
+        return self.inventory.audit_transactions(limit)
 
     def audit_events(
         self, institution_id: str, *, actor_id: str | None = None,

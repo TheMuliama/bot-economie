@@ -1,7 +1,7 @@
 """Versioned definitions for the items known by M Corp.
 
 The catalogue answers which item types exist.  It deliberately contains no
-stock nor owner information: those belong to :mod:`mcorp.inventory`.
+stock nor owner information: those belong to :mod:`mcorp.inventory_store`.
 """
 
 from __future__ import annotations
