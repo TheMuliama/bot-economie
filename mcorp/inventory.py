@@ -10,6 +10,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .sqlite import open_database
+
 
 USER_OWNER_TYPE = "USER"
 SYSTEM_OWNER_TYPE = "SYSTEM"
@@ -223,10 +225,7 @@ class InventoryStore:
         return [self._transaction_from_row(row) for row in rows]
 
     def _connection(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.database_path)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        return connection
+        return open_database(self.database_path)
 
     @staticmethod
     def _require_positive_quantity(quantity: int) -> None:

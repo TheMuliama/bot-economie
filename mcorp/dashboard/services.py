@@ -6,12 +6,10 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from ..bootstrap import build_core_services
 from ..catalog import ITEM_CATALOG
 from ..control import ControlError, EconomyControlService
-from ..inventory import InventoryStore
-from ..inventory_service import InventoryService
-from ..ledger import LedgerStore
-from ..shops import LICENSE_EXPIRED, SHOP_ACTIVE, ShopStore
+from ..shops import LICENSE_EXPIRED, SHOP_ACTIVE
 from .permissions import DashboardUser
 from ..identities import DiscordIdentityStore
 from .scheduler import ProductionScheduleStore
@@ -35,27 +33,20 @@ class DashboardService:
 
     def __init__(
         self, control: EconomyControlService, schedules: ProductionScheduleStore,
-        institution_id: str, identities: DiscordIdentityStore | None = None,
+        institution_id: str, identities: DiscordIdentityStore,
     ) -> None:
         self.control = control
         self.schedules = schedules
         self.institution_id = institution_id
-        self.identities = identities or DiscordIdentityStore(control.ledger.database_path)
-        self.identities.initialize()
+        self.identities = identities
 
     @classmethod
     def from_database(cls, database_path: Path, institution_id: str) -> "DashboardService":
-        ledger = LedgerStore(database_path)
-        inventory_store = InventoryStore(database_path)
-        shops = ShopStore(database_path)
+        core = build_core_services(database_path)
         schedules = ProductionScheduleStore(database_path)
-        ledger.initialize()
-        inventory_store.initialize()
-        shops.initialize()
         schedules.initialize()
-        control = EconomyControlService(ledger, InventoryService(inventory_store), shops)
-        control.ensure_official_shop(institution_id)
-        return cls(control, schedules, institution_id)
+        core.control.ensure_official_shop(institution_id)
+        return cls(core.control, schedules, institution_id, core.identities)
 
     def overview(self) -> dict[str, Any]:
         reports = self.control.list_shop_reports(self.institution_id)

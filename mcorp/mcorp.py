@@ -8,14 +8,14 @@ from typing import Any
 from redbot.core import bank, commands
 from redbot.core.data_manager import cog_data_path
 
-from .ledger import InsufficientLedgerFunds, InvalidAmount, LedgerStore, SameAccountTransfer
+from .bootstrap import build_core_services
+from .ledger import InsufficientLedgerFunds, InvalidAmount, SameAccountTransfer
 from .catalog import get_item
 from .control import (
     AutoRestockDisabled,
     AutoRestockNotAllowed,
     ControlOperationFailed,
     ControlRecoveryRequired,
-    EconomyControlService,
     InvalidControlValue,
     RestockBudgetExceeded,
     RestockThresholdNotReached,
@@ -33,18 +33,15 @@ from .inventory import (
     InvalidItemQuantity,
     InventoryCapacityExceeded,
     InventoryOwner,
-    InventoryStore,
     SameInventoryOwner,
     USER_OWNER_TYPE,
 )
 from .inventory_service import (
-    InventoryService,
     ItemNotTransferable,
     NonStackableQuantity,
     UnknownItem,
 )
-from .identities import DiscordIdentityStore
-from .shops import ShopNotFound, ShopStore
+from .shops import ShopNotFound
 from .service import (
     BankingOperationError,
     BankingService,
@@ -79,21 +76,14 @@ class MCorp(commands.Cog):
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
-        self.ledger = LedgerStore(cog_data_path(self) / "ledger.sqlite3")
+        core = build_core_services(cog_data_path(self) / "ledger.sqlite3")
+        self.ledger = core.ledger
         self.banking = BankingService(self.ledger, RedBankGateway())
-        self.inventory_store = InventoryStore(self.ledger.database_path)
-        self.inventory = InventoryService(self.inventory_store)
-        self.shop_store = ShopStore(self.ledger.database_path)
-        self.control = EconomyControlService(self.ledger, self.inventory, self.shop_store)
-        self.identity_store = DiscordIdentityStore(self.ledger.database_path)
-
-    async def cog_load(self) -> None:
-        # The schema creation is small and happens once at cog load. Keeping it
-        # synchronous also avoids executor lifecycle issues during Red startup.
-        self.ledger.initialize()
-        self.inventory_store.initialize()
-        self.shop_store.initialize()
-        self.identity_store.initialize()
+        self.inventory_store = core.inventory_store
+        self.inventory = core.inventory
+        self.shop_store = core.shop_store
+        self.control = core.control
+        self.identity_store = core.identities
 
     async def cog_before_invoke(self, ctx: commands.Context) -> None:
         """Remember active command authors without scanning the Discord guild."""

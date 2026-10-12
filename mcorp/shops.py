@@ -10,6 +10,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .sqlite import open_database
+
 
 M_CORP_STORE_ID = "M_CORP_STORE"
 SHOP_ACTIVE = "ACTIVE"
@@ -627,10 +629,7 @@ class ShopStore:
         )
 
     def _connection(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.database_path)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        return connection
+        return open_database(self.database_path)
 
     @staticmethod
     def _insert_event(

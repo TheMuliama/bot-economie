@@ -6,6 +6,8 @@ import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .sqlite import open_database
+
 
 class DiscordIdentityStore:
     """Remember known Discord names without implementing rename-item behavior."""
@@ -54,6 +56,4 @@ class DiscordIdentityStore:
         return str(row["known_nickname"])
 
     def _connection(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.database_path)
-        connection.row_factory = sqlite3.Row
-        return connection
+        return open_database(self.database_path)

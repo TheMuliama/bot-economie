@@ -14,6 +14,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Iterable
 
+from .sqlite import open_database
+
 
 DEFAULT_INSTITUTION_ID = "mcorp"
 USER_OWNER_TYPE = "USER"
@@ -659,10 +661,7 @@ class LedgerStore:
         ]
 
     def _connection(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.database_path)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        return connection
+        return open_database(self.database_path)
 
     def _get_or_create_user_account(
         self, connection: sqlite3.Connection, institution_id: str, user_id: int

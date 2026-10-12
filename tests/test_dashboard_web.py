@@ -111,6 +111,7 @@ class DashboardWebTests(unittest.TestCase):
             ),
             ProductionScheduleStore(self.path),
             INSTITUTION,
+            DiscordIdentityStore(self.path),
         )
         self.app = create_app(self.settings, self.service, FakeOAuth(self.settings))
         self.client = ASGIClient(self.app)

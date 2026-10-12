@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Callable
 
 from ..control import EconomyControlService
+from ..sqlite import open_database
 
 
 @dataclass(frozen=True)
@@ -246,10 +247,7 @@ class ProductionScheduleStore:
         return [self._run(row) for row in rows]
 
     def _connection(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.database_path, timeout=10)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        return connection
+        return open_database(self.database_path)
 
     @staticmethod
     def _schedule(row: sqlite3.Row) -> ProductionSchedule:
