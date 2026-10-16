@@ -2,6 +2,8 @@
 
 Cog Red-DiscordBot pour les mécaniques économiques de M Corp.
 
+La documentation courante V1 est disponible dans le [wiki local](docs/README.md).
+
 ## Banking MVP V1
 
 Red Bank est l'unique source de vérité des **R-crédits**. Le compte Red Bank

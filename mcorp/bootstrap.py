@@ -11,6 +11,7 @@ from .inventory_store import InventoryStore
 from .inventory_service import InventoryService
 from .ledger import LedgerStore
 from .shop_store import ShopStore
+from .purchase_service import PurchaseService
 
 
 @dataclass(frozen=True)
@@ -20,6 +21,7 @@ class CoreServices:
     inventory: InventoryService
     shop_store: ShopStore
     control: EconomyControlService
+    purchases: PurchaseService
     identities: DiscordIdentityStore
 
 
@@ -35,8 +37,10 @@ def build_core_services(database_path: Path) -> CoreServices:
     inventory_store.initialize()
     shop_store.initialize()
     identities.initialize()
+    purchases = PurchaseService(ledger, shop_store)
+    purchases.initialize()
 
     control = EconomyControlService(ledger, inventory, shop_store)
     return CoreServices(
-        ledger, inventory_store, inventory, shop_store, control, identities
+        ledger, inventory_store, inventory, shop_store, control, purchases, identities
     )

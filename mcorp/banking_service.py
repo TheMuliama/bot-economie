@@ -247,6 +247,30 @@ class BankingService:
                 )
                 raise BankingOperationError("Le paiement a été annulé après une erreur interne.") from exc
 
+    async def cash_purchase(
+        self, institution_id: str, player: Any, vault: Any, amount: int, commit: Any
+    ) -> Any:
+        """Turn player cash into covered credits only after a sale can be committed.
+
+        ``commit`` is the SQLite purchase leg.  It is deliberately supplied by
+        the purchase service so this banking boundary remains unaware of shops
+        and inventory.
+        """
+        self._require_positive_amount(amount)
+        async with self._operation_lock:
+            self._require_initialized(institution_id)
+            await self._require_invariant(institution_id, vault)
+            await self._require_cash(player, amount)
+            await self._move_cash(player, vault, amount)
+            try:
+                return commit()
+            except Exception as exc:
+                await self._compensate_or_raise(
+                    institution_id, "CASH_SHOP_PURCHASE", amount, (player.id,),
+                    source=vault, destination=player, original_error=exc,
+                )
+                raise BankingOperationError("L'achat liquide a été annulé après une erreur interne.") from exc
+
     async def admin_cash_credit(
         self, institution_id: str, administrator: Any, member: Any, amount: int
     ) -> int:

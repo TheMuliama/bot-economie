@@ -26,6 +26,7 @@ from .shop_store import (
     Shop,
     ShopNotFound,
     ShopStore,
+    ShopSaleItem,
     WholesaleItem,
     utc_now,
 )
@@ -311,6 +312,27 @@ class EconomyControlService:
         self.shops.set_item_permission(
             institution_id, shop_id, item_id.casefold(), allowed, str(administrator_id)
         )
+
+    def set_sale_price(
+        self, institution_id: str, shop_id: str, item_id: str, unit_price: int,
+        *, administrator_id: int,
+    ) -> ShopSaleItem:
+        """Publish a player-facing price; it never changes the wholesale catalogue."""
+        self._shop(institution_id, shop_id)
+        self._item(item_id)
+        if not isinstance(unit_price, int) or unit_price <= 0:
+            raise InvalidControlValue("sale_price")
+        if not self.shops.item_is_allowed(institution_id, shop_id, item_id.casefold()):
+            raise ShopItemDenied(item_id)
+        sale_item = self.shops.set_sale_item(
+            institution_id, shop_id, item_id.casefold(), unit_price
+        )
+        self.shops.record_event(
+            institution_id, "SHOP_SALE_PRICE_SET", shop_id=shop_id,
+            actor_id=str(administrator_id),
+            metadata={"item_id": sale_item.item_id, "unit_price": unit_price},
+        )
+        return sale_item
 
     def set_restock_policy(
         self, institution_id: str, shop_id: str, item_id: str, *, enabled: bool,

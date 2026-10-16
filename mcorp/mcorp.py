@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import uuid
 from typing import Any
 
 from redbot.core import bank, commands
@@ -53,6 +54,13 @@ from .banking_service import (
     RecoveryRequired,
 )
 from .red_bank import RedBankGateway
+from .purchase_service import (
+    PurchaseError,
+    PurchaseInsufficientFunds,
+    PurchaseInsufficientStock,
+    PurchasePaymentNotAllowed,
+    PurchasePriceChanged,
+)
 
 
 class MCorp(commands.Cog):
@@ -64,6 +72,7 @@ class MCorp(commands.Cog):
         self.banking = BankingService(core.ledger, RedBankGateway())
         self.inventory = core.inventory
         self.control = core.control
+        self.purchases = core.purchases
         self.identity_store = core.identities
 
     async def cog_before_invoke(self, ctx: commands.Context) -> None:
@@ -190,6 +199,80 @@ class MCorp(commands.Cog):
     async def inventaire(self, ctx: commands.Context) -> None:
         """Affiche votre liquide Red et vos objets M Corp."""
         await self._send_inventory(ctx, ctx.author)
+
+    @commands.command()
+    @commands.guild_only()
+    async def boutique(self, ctx: commands.Context, shop_id: str | None = None) -> None:
+        """Consulte le marché joueur et achète un article en une confirmation.
+
+        Syntaxe volontairement courte pour V1 : ``m!boutique`` liste les
+        boutiques, ``m!boutique ID`` leur catalogue, puis
+        ``m!boutique ID item quantité BANK|CASH`` reste disponible via la
+        commande ``m!acheter`` ci-dessous lorsque les composants Discord ne
+        sont pas utilisables (DM, client ancien ou interaction expirée).
+        """
+        institution_id, _ = await self._bank_context(ctx)
+        if shop_id is None:
+            shops = self.purchases.accessible_shops(institution_id)
+            if not shops:
+                await ctx.send("Aucune boutique publique n'est disponible actuellement.")
+                return
+            lines = [f"• **{shop.display_name}** — `{shop.shop_id}`" for shop in shops]
+            await ctx.send("**M Corp — Marché Élite R&T**\nChoisissez une boutique :\n" + "\n".join(lines))
+            return
+        try:
+            items = self.purchases.catalog(institution_id, shop_id.upper())
+        except PurchaseError:
+            await ctx.send("Cette boutique n'est pas disponible.")
+            return
+        if not items:
+            await ctx.send("Cette boutique ne propose aucun article en stock.")
+            return
+        lines = [f"• `{item.item_id}` — {item.unit_price} RTC — stock ×{item.stock}" for item in items]
+        await ctx.send(
+            f"**Boutique `{shop_id.upper()}`**\n" + "\n".join(lines)
+            + "\n\nAcheter : `m!acheter <boutique> <objet> <quantité> <BANK|CASH>`."
+        )
+
+    @commands.command()
+    @commands.guild_only()
+    async def acheter(
+        self, ctx: commands.Context, shop_id: str, item_id: str, quantite: int, paiement: str
+    ) -> None:
+        """Finalise une vente V1 après toutes les validations côté métier."""
+        institution_id, vault = await self._bank_context(ctx)
+        method = paiement.upper()
+        purchase_id = str(uuid.uuid4())
+        try:
+            catalog = {item.item_id: item for item in self.purchases.catalog(institution_id, shop_id.upper())}
+            displayed = catalog.get(item_id.casefold())
+            if displayed is None:
+                await ctx.send("Cet article n'est plus disponible dans cette boutique.")
+                return
+            if method == "BANK":
+                result = self.purchases.purchase_bank(
+                    institution_id, ctx.author.id, shop_id.upper(), item_id, quantite, purchase_id,
+                    expected_unit_price=displayed.unit_price,
+                )
+            elif method == "CASH":
+                total = displayed.unit_price * quantite
+                result = await self.banking.cash_purchase(
+                    institution_id, ctx.author, vault, total,
+                    lambda: self.purchases.commit_cash_purchase(
+                        institution_id, ctx.author.id, shop_id.upper(), item_id, quantite, purchase_id,
+                        expected_unit_price=displayed.unit_price,
+                    ),
+                )
+            else:
+                await ctx.send("Moyen de paiement invalide : utilisez `BANK` ou `CASH`.")
+                return
+        except Exception as exc:
+            await self._send_purchase_error(ctx, exc)
+            return
+        await ctx.send(
+            f"Achat confirmé : `{result.item_id}` ×{result.quantity} pour {result.total} RTC "
+            f"par {result.payment_method}. Référence : `{result.purchase_id}`."
+        )
 
     @commands.command()
     @commands.guild_only()
@@ -632,6 +715,25 @@ class MCorp(commands.Cog):
     @commands.command()
     @commands.guild_only()
     @commands.is_owner()
+    async def shopsetsaleprice(
+        self, ctx: commands.Context, shop_id: str, item_id: str, prix: int
+    ) -> None:
+        """[Propriétaire] Définit le prix joueur d'un article de boutique."""
+        institution_id, _ = await self._bank_context(ctx)
+        try:
+            item = self.control.set_sale_price(
+                institution_id, shop_id.upper(), item_id, prix, administrator_id=ctx.author.id
+            )
+        except Exception as exc:
+            await self._send_control_error(ctx, exc)
+            return
+        await ctx.send(
+            f"Prix joueur de `{item.item_id}` dans `{item.shop_id}` : {item.unit_price} crédits."
+        )
+
+    @commands.command()
+    @commands.guild_only()
+    @commands.is_owner()
     async def shopallowitem(self, ctx: commands.Context, shop_id: str, item_id: str) -> None:
         """[Propriétaire] Autorise un objet grossiste pour une boutique."""
         await self._set_shop_item_permission(ctx, shop_id, item_id, True)
@@ -839,6 +941,21 @@ class MCorp(commands.Cog):
             await ctx.send("Vous ne pouvez pas transférer un objet vers le même inventaire.")
         else:
             raise exc
+
+    @staticmethod
+    async def _send_purchase_error(ctx: commands.Context, exc: Exception) -> None:
+        if isinstance(exc, PurchaseInsufficientFunds):
+            await ctx.send("Votre compte M Bank ne contient pas assez de RTC.")
+        elif isinstance(exc, PurchaseInsufficientStock):
+            await ctx.send("Le stock a changé : quantité insuffisante.")
+        elif isinstance(exc, PurchasePriceChanged):
+            await ctx.send("Le prix a changé : consultez de nouveau la boutique avant de confirmer.")
+        elif isinstance(exc, PurchasePaymentNotAllowed):
+            await ctx.send("Ce moyen de paiement n'est pas accepté par la boutique.")
+        elif isinstance(exc, PurchaseError):
+            await ctx.send("Cet achat n'est plus disponible.")
+        else:
+            await MCorp._send_operation_error(ctx, exc)
 
     @staticmethod
     async def _send_control_error(ctx: commands.Context, exc: Exception) -> None:

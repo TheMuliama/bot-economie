@@ -63,6 +63,16 @@ class WholesaleItem:
 
 
 @dataclass(frozen=True)
+class ShopSaleItem:
+    """A player-facing price.  Wholesale prices are deliberately separate."""
+
+    institution_id: str
+    shop_id: str
+    item_id: str
+    unit_price: int
+
+
+@dataclass(frozen=True)
 class RestockPolicy:
     institution_id: str
     shop_id: str
@@ -174,6 +184,19 @@ class ShopStore:
                     FOREIGN KEY (institution_id, shop_id)
                         REFERENCES shops(institution_id, shop_id)
                 );
+
+                CREATE TABLE IF NOT EXISTS shop_sale_items (
+                    institution_id TEXT NOT NULL,
+                    shop_id TEXT NOT NULL,
+                    item_id TEXT NOT NULL,
+                    unit_price INTEGER NOT NULL CHECK (unit_price > 0),
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (institution_id, shop_id, item_id),
+                    FOREIGN KEY (institution_id, shop_id)
+                        REFERENCES shops(institution_id, shop_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_shop_sale_items_shop
+                    ON shop_sale_items(institution_id, shop_id);
 
                 CREATE TABLE IF NOT EXISTS shop_restock_policies (
                     institution_id TEXT NOT NULL,
@@ -470,6 +493,48 @@ class ShopStore:
                 (institution_id, shop_id, item_id),
             ).fetchone()
         return row is not None and bool(row["can_purchase"])
+
+    def set_sale_item(
+        self, institution_id: str, shop_id: str, item_id: str, unit_price: int
+    ) -> ShopSaleItem:
+        with self._connection() as connection:
+            connection.execute(
+                """INSERT INTO shop_sale_items (
+                    institution_id, shop_id, item_id, unit_price, updated_at
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(institution_id, shop_id, item_id) DO UPDATE SET
+                    unit_price = excluded.unit_price, updated_at = excluded.updated_at""",
+                (institution_id, shop_id, item_id, unit_price, utc_now().isoformat()),
+            )
+        item = self.get_sale_item(institution_id, shop_id, item_id)
+        assert item is not None
+        return item
+
+    def get_sale_item(
+        self, institution_id: str, shop_id: str, item_id: str
+    ) -> ShopSaleItem | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                """SELECT institution_id, shop_id, item_id, unit_price FROM shop_sale_items
+                   WHERE institution_id = ? AND shop_id = ? AND item_id = ?""",
+                (institution_id, shop_id, item_id),
+            ).fetchone()
+        return None if row is None else ShopSaleItem(
+            str(row["institution_id"]), str(row["shop_id"]), str(row["item_id"]),
+            int(row["unit_price"]),
+        )
+
+    def list_sale_items(self, institution_id: str, shop_id: str) -> list[ShopSaleItem]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                """SELECT institution_id, shop_id, item_id, unit_price FROM shop_sale_items
+                   WHERE institution_id = ? AND shop_id = ? ORDER BY item_id""",
+                (institution_id, shop_id),
+            ).fetchall()
+        return [ShopSaleItem(
+            str(row["institution_id"]), str(row["shop_id"]), str(row["item_id"]),
+            int(row["unit_price"]),
+        ) for row in rows]
 
     def list_item_permissions(self, institution_id: str) -> list[dict[str, Any]]:
         with self._connection() as connection:
