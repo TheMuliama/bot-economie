@@ -2,8 +2,14 @@
 .venv/
 venv/
 
-# Variables d'environnement / secrets
+# Configuration locale (les valeurs réelles ne sont jamais versionnées)
 .env
+.env.*
+!.env.example
+
+# Fichiers de clés locaux
+*.pem
+*.key
 
 # Python
 __pycache__/

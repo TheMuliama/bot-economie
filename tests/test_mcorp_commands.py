@@ -1,162 +1,108 @@
-"""Focused command-level tests without requiring a running Discord connection."""
+"""Command tests for the small HTTP-only MCorp cog."""
 
 from __future__ import annotations
 
 import unittest
-from types import SimpleNamespace
-from unittest.mock import patch
 
+from mcorp.api_client import MCorpApiError, SHOP_OWNER
+from mcorp import setup
 from mcorp.mcorp import MCorp
 
 
 class Member:
     def __init__(self, member_id: int, name: str) -> None:
-        self.id = member_id
-        self.display_name = name
-        self.mention = f"@{name}"
+        self.id, self.display_name, self.mention = member_id, name, f"@{name}"
 
 
 class Context:
     def __init__(self, author: Member) -> None:
-        self.author = author
-        self.guild = object()
-        self.sent: list[str] = []
+        self.author, self.guild, self.sent = author, object(), []
 
     async def send(self, message: str) -> None:
         self.sent.append(message)
 
 
-class Banking:
+class Api:
     def __init__(self) -> None:
-        self.cash_calls: list[tuple[object, object, object, int]] = []
-        self.treasury_calls: list[tuple[object, object, object, int]] = []
-        self.transfer_calls: list[tuple[object, object, object, object, int]] = []
-        self.transactions: list[object] = []
+        self.calls: list[tuple[str, tuple[object, ...]]] = []
+        self.error: Exception | None = None
 
-    def account_balance(self, institution_id: str, user_id: int) -> int:
-        return 300
+    async def wallet(self, user_id: str):
+        self.calls.append(("wallet", (user_id,)))
+        if self.error: raise self.error
+        return {"balance": 400}
 
-    def recent_transactions(
-        self, institution_id: str, user_id: int, limit: int = 10
-    ) -> list[object]:
-        return self.transactions[:limit]
+    async def inventory(self, owner):
+        self.calls.append(("inventory", (owner,)))
+        if self.error: raise self.error
+        return {"items": [{"item_id": "potion", "quantity": 2}]}
 
-    async def cash_transfer(self, *args):  # type: ignore[no-untyped-def]
-        self.cash_calls.append(args)
+    async def transfer(self, *args):
+        self.calls.append(("transfer", args))
+        if self.error: raise self.error
+        return {"source_balance": 300, "destination_balance": 100}
 
-    async def pay_treasury(self, *args):  # type: ignore[no-untyped-def]
-        self.treasury_calls.append(args)
-        return (200, 100)
+    async def exchange(self, *args):
+        self.calls.append(("exchange", args))
+        if self.error: raise self.error
+        return {"buyer_balance": 200, "buyer_quantity": 1}
 
-    async def bank_transfer(self, *args):  # type: ignore[no-untyped-def]
-        self.transfer_calls.append(args)
-        return (200, 400)
-
-
-class Identities:
-    def __init__(self) -> None:
-        self.seen: list[tuple[str, str]] = []
-
-    def remember_known_nickname(self, discord_id: str, nickname: str) -> None:
-        self.seen.append((discord_id, nickname))
+    async def consume(self, *args):
+        self.calls.append(("consume", args))
+        if self.error: raise self.error
+        return {"quantity": 0}
 
 
 class MCorpCommandTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
-        self.alice = Member(1, "Alice")
-        self.bob = Member(2, "Bob")
-        self.ctx = Context(self.alice)
+        self.alice, self.bob = Member(1, "Alice"), Member(2, "Bob")
+        self.ctx, self.api = Context(self.alice), Api()
         self.cog = object.__new__(MCorp)
-        self.cog.banking = Banking()
-        self.cog.identity_store = Identities()
+        self.cog.api, self.cog.configuration_error = self.api, None
 
-        async def bank_context(ctx):  # type: ignore[no-untyped-def]
-            return "mcorp:guild:1", Member(999, "M Corp")
+    async def test_wallet_and_inventory_use_discord_ids(self) -> None:
+        await MCorp.argent.callback(self.cog, self.ctx, self.bob)
+        await MCorp.inventaire.callback(self.cog, self.ctx, self.bob)
+        self.assertEqual(self.api.calls[0], ("wallet", ("2",)))
+        self.assertEqual(self.api.calls[1][1][0]["owner_id"], "2")
 
-        self.cog._bank_context = bank_context
+    async def test_transfer_rejects_bad_amount_and_self_then_uses_api(self) -> None:
+        await MCorp.donner.callback(self.cog, self.ctx, self.bob, 0)
+        await MCorp.donner.callback(self.cog, self.ctx, self.alice, 5)
+        await MCorp.donner.callback(self.cog, self.ctx, self.bob, 100)
+        call = self.api.calls[-1]
+        self.assertEqual(call[0], "transfer")
+        self.assertEqual(call[1][:3], ("1", "2", 100))
+        self.assertTrue(str(call[1][3]).startswith("discord-transfer-"))
 
-    async def test_argent_aggregates_red_cash_and_mcorp_account(self) -> None:
-        async def get_balance(member):  # type: ignore[no-untyped-def]
-            return 800
+    async def test_shop_purchase_and_consumption(self) -> None:
+        await MCorp.boutique.callback(self.cog, self.ctx)
+        await MCorp.acheter.callback(self.cog, self.ctx, "potion", 1)
+        await MCorp.utiliser.callback(self.cog, self.ctx, "potion")
+        self.assertEqual(self.api.calls[0], ("inventory", (SHOP_OWNER,)))
+        self.assertEqual(self.api.calls[1][0], "exchange")
+        self.assertEqual(self.api.calls[1][1][0:4], ("1", "potion", 1, 200))
+        self.assertEqual(self.api.calls[2][0], "consume")
 
-        async def get_currency_name(guild):  # type: ignore[no-untyped-def]
-            return "R"
+    async def test_api_error_is_user_facing(self) -> None:
+        self.api.error = MCorpApiError("Opération refusée : fonds ou stock insuffisant.")
+        await MCorp.acheter.callback(self.cog, self.ctx, "potion", 1)
+        self.assertIn("fonds ou stock insuffisant", self.ctx.sent[-1])
 
-        with patch("mcorp.mcorp.bank.get_balance", get_balance), patch(
-            "mcorp.mcorp.bank.get_currency_name", get_currency_name
-        ):
-            await MCorp.argent.callback(self.cog, self.ctx)
+    def test_only_mvp_commands_are_registered(self) -> None:
+        names = {command.name for command in MCorp.__cog_commands__}
+        self.assertEqual(names, {"argent", "donner", "inventaire", "boutique", "acheter", "utiliser"})
 
-        self.assertIn("Sur vous : 800 R", self.ctx.sent[0])
-        self.assertIn("Compte bancaire : 300 crédits", self.ctx.sent[0])
+    async def test_setup_loads_the_cog_without_legacy_services(self) -> None:
+        class Bot:
+            def __init__(self) -> None:
+                self.cog = None
 
-    async def test_payer_mcorp_uses_banking_treasury_payment(self) -> None:
-        await MCorp.payer.callback(self.cog, self.ctx, "mcorp", 100)
+            async def add_cog(self, cog) -> None:
+                self.cog = cog
 
-        self.assertEqual(len(self.cog.banking.treasury_calls), 1)
-        self.assertIn("Paiement de 100 crédits à M Corp", self.ctx.sent[0])
-
-    async def test_payer_member_uses_banking_transfer(self) -> None:
-        class Converter:
-            async def convert(self, ctx, argument):  # type: ignore[no-untyped-def]
-                return self_bob
-
-        self_bob = self.bob
-        with patch("mcorp.mcorp.commands.MemberConverter", Converter):
-            await MCorp.payer.callback(self.cog, self.ctx, "@Bob", 100)
-
-        self.assertEqual(len(self.cog.banking.transfer_calls), 1)
-        self.assertIn("Paiement bancaire de 100 crédits", self.ctx.sent[0])
-
-    async def test_donner_cash_uses_red_bank_transfer_and_not_inventory(self) -> None:
-        async def get_currency_name(guild):  # type: ignore[no-untyped-def]
-            return "R"
-
-        with patch("mcorp.mcorp.bank.get_currency_name", get_currency_name):
-            await MCorp.donner.callback(self.cog, self.ctx, self.bob, "100R", None)
-
-        self.assertEqual(self.cog.banking.cash_calls[0][-1], 100)
-        self.assertIn("100 R", self.ctx.sent[0])
-
-    async def test_active_command_members_are_remembered(self) -> None:
-        async def get_currency_name(guild):  # type: ignore[no-untyped-def]
-            return "R"
-
-        await self.cog.cog_before_invoke(self.ctx)
-        with patch("mcorp.mcorp.bank.get_currency_name", get_currency_name):
-            await MCorp.donner.callback(self.cog, self.ctx, self.bob, "100R", None)
-
-        self.assertEqual(
-            self.cog.identity_store.seen,
-            [("1", "Alice"), ("2", "Bob")],
-        )
-
-    def test_cash_token_parser_is_unambiguous(self) -> None:
-        self.assertEqual(MCorp._parse_cash_amount("100R"), 100)
-        self.assertEqual(MCorp._parse_cash_amount("100r"), 100)
-        self.assertIsNone(MCorp._parse_cash_amount("100"))
-        self.assertIsNone(MCorp._parse_cash_amount("immunity"))
-
-    async def test_solde_compatibility_command_redirects_to_argent(self) -> None:
-        async def get_balance(member):  # type: ignore[no-untyped-def]
-            return 800
-
-        async def get_currency_name(guild):  # type: ignore[no-untyped-def]
-            return "R"
-
-        with patch("mcorp.mcorp.bank.get_balance", get_balance), patch(
-            "mcorp.mcorp.bank.get_currency_name", get_currency_name
-        ):
-            await MCorp.solde.callback(self.cog, self.ctx)
-
-        self.assertIn("remplacée par `m!argent`", self.ctx.sent[0])
-        self.assertIn("Sur vous : 800 R", self.ctx.sent[1])
-
-    async def test_transactions_uses_public_banking_query(self) -> None:
-        self.cog.banking.transactions = [
-            SimpleNamespace(transaction_type="DEPOSIT", amount=50, status="COMPLETED")
-        ]
-
-        await MCorp.transactions.callback(self.cog, self.ctx)
-
-        self.assertIn("`DEPOSIT` — 50 crédits — COMPLETED", self.ctx.sent[0])
+        bot = Bot()
+        await setup(bot)
+        self.assertIsInstance(bot.cog, MCorp)
+        self.assertFalse(hasattr(bot.cog, "banking"))
+        self.assertFalse(hasattr(bot.cog, "control"))
